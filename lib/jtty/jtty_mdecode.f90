@@ -43,6 +43,8 @@ module jtty_mdec
      logical :: complete = .false.
   end type message_update
 
+  ! Subtract frames decoded in earlier windows before searching a later one.
+  logical, parameter        :: PRESUBTRACT_DECODED = .true.
   ! Refuse a decode that disagrees with its re-encoded frame on more symbols.
   integer, parameter        :: MAX_SYMBOL_ERRORS = 30
   integer, parameter        :: MAX_DECODES = 100
@@ -76,6 +78,11 @@ module jtty_mdec
   real                      :: subtracted_f1(MAX_SUBTRACTED) = 0.0
   real                      :: subtracted_tsync(MAX_SUBTRACTED) = 0.0
   integer                   :: subtracted_payload(PAYLOAD_BITS,MAX_SUBTRACTED) = 0
+  ! Frames decoded so far that may still overlap a window yet to be searched.
+  integer                   :: nknown = 0
+  real                      :: known_f1(MAX_RECENT_FRAMES) = 0.0
+  real                      :: known_tsync(MAX_RECENT_FRAMES) = 0.0
+  integer                   :: known_payload(PAYLOAD_BITS,MAX_RECENT_FRAMES) = 0
   complex, allocatable, private :: sync_chirp_weights(:),sync_chirp_kernel(:)
   integer, private :: sync_chirp_samples=0,sync_chirp_first_bin=-1
   integer, private :: sync_chirp_output_count=0
@@ -222,6 +229,7 @@ contains
   subroutine reset_decode_search_state()
       nactive=0
       nrecent=0
+      nknown=0
   end subroutine reset_decode_search_state
 
   subroutine discard_pending_updates()
@@ -420,6 +428,18 @@ contains
          if(keep.ne.i) recent_frames(keep)=recent_frames(i)
       enddo
       nrecent=keep
+
+      keep=0
+      do i=1,nknown
+         if(known_tsync(i)+frame_period.lt.oldest_revisit) cycle
+         keep=keep+1
+         if(keep.ne.i) then
+            known_f1(keep)=known_f1(i)
+            known_tsync(keep)=known_tsync(i)
+            known_payload(:,keep)=known_payload(:,i)
+         endif
+      enddo
+      nknown=keep
 
       i=1
       do while(i.le.nactive)
@@ -669,6 +689,18 @@ contains
          tone_symbols_full(NSYNC_SYM+1:NFRAME_SYM)=tone_symbols_chk
          call subtract_jtty(c0, nana, nchunk6, tone_symbols_full, NFRAME_SYM, &
               nss, use_interferer_f1, use_interferer_tsync-(istart-1)/12000.0)
+      endif
+
+      if(PRESUBTRACT_DECODED) then
+         do i=1,nknown
+            xdt=known_tsync(i)-(istart-1)/12000.0
+            if(xdt.ge.0.0 .or. xdt+nframe6/6000.0.le.0.0) cycle
+            tone_symbols_full(1:NSYNC_SYM)=is13
+            call jtty_tbcc_reencode_for_subtraction(known_payload(:,i), tone_symbols_chk)
+            tone_symbols_full(NSYNC_SYM+1:NFRAME_SYM)=tone_symbols_chk
+            call subtract_jtty(c0, nana, nchunk6, tone_symbols_full, NFRAME_SYM, &
+                 nss, known_f1(i), xdt)
+         enddo
       endif
 
 ! Look for up to 2 sync candidates in each quarter-frame (0.424 second) by 2*FTol rectangle in
@@ -1159,6 +1191,13 @@ contains
          else
             match=.false.
          endif
+      endif
+
+      if(.not.is_pure_dupe .and. nknown.lt.MAX_RECENT_FRAMES) then
+         nknown=nknown+1
+         known_f1(nknown)=dec%f1
+         known_tsync(nknown)=dec%tsync
+         known_payload(:,nknown)=final_payload
       endif
 
       if(.not.is_pure_dupe .and. match) then
