@@ -66,6 +66,11 @@ module jtty_mdec
   ! reserved bit pruned, if the grid's gate reads FALLBACK_GRID_NSYNC and _SNR.
   integer, parameter        :: FALLBACK_GRID_NSYNC = 9
   real, parameter           :: FALLBACK_GRID_SNR = 5.0
+  ! Up to EXTRA_CANDIDATES more picks past the budget, ranked by prominence over
+  ! each bin's steady level, so other modes' signals cannot use up the picks.
+  integer, parameter        :: EXTRA_CANDIDATES = 8
+  integer, parameter        :: EXTRA_GATE_NSYNC = 8
+  integer, parameter        :: EXTRA_MAX_SYMBOL_ERRORS = 26
   ! Try only picks whose sync power is at least the floor times the local noise level.
   real, parameter           :: QSO_SYNC_FLOOR = 11.0
   real, parameter           :: WIDE_SYNC_FLOOR = 13.0
@@ -320,6 +325,41 @@ contains
       enddo
       med=w(k)
   end subroutine select_median
+
+  subroutine select_kth(w,n,k,val)
+      ! The k-th smallest of w(1:n) (w is reordered).
+      integer, intent(in) :: n,k
+      real, intent(inout) :: w(n)
+      real, intent(out) :: val
+      integer :: lo,hi,i,j
+      real :: x,t
+
+      lo=1
+      hi=n
+      do while(lo.lt.hi)
+         x=w((lo+hi)/2)
+         i=lo
+         j=hi
+         do while(i.le.j)
+            do while(w(i).lt.x)
+               i=i+1
+            enddo
+            do while(x.lt.w(j))
+               j=j-1
+            enddo
+            if(i.le.j) then
+               t=w(i)
+               w(i)=w(j)
+               w(j)=t
+               i=i+1
+               j=j-1
+            endif
+         enddo
+         if(j.lt.k) lo=i
+         if(k.lt.i) hi=j
+      enddo
+      val=w(k)
+  end subroutine select_kth
 
   subroutine running_median(x,n,nhalf,med)
       ! med(i) = median of x(i-nhalf:i+nhalf).
@@ -811,7 +851,7 @@ contains
       logical                        :: prune_fallback
       logical                        :: use_back
       integer                        :: merge_mode
-      integer, parameter             :: MODE_BLIND=0, MODE_PREDICT=1, MODE_BACK=2
+      integer, parameter             :: MODE_BLIND=0, MODE_PREDICT=1, MODE_BACK=2, MODE_EXTRA=3
       real                            :: use_interferer_f1, use_interferer_tsync
       integer                         :: use_interferer_payload(PAYLOAD_BITS)
 
@@ -1227,79 +1267,9 @@ contains
             exit
          enddo
          if(nsloc(1).lt.1) exit
-         fbest   = jpk*df2
-         xdtbest = ipk*dt*12
-
-         if(.not.GATE_FIRST) call refine_pick(xdtbest,fbest)
-
-         if(ncand .ge. MAXCAND) exit
-         ncand=ncand+1
-         cand(ncand)%xdt=xdtbest
-         cand(ncand)%f1=fbest
-
-         a=0.
-         a(1)=-cand(ncand)%f1                                !Shift peak to zero frequency
-         call twkfreq(c0,c1,nchunk6,6000.0,a)
-
-         pt=0.
-         pa=0.
-         pow=0.0
-         do j=1,NSYNC_SYM                                ! find tone powers for sync symbols
-            i0=nint(cand(ncand)%xdt/dt) + (j-1)*nss
-            if(i0+nss.gt.nchunk6) exit
-
-            do i=0,3
-               z = dot_product(ctones(0:nss-1,i), c1(i0:i0+nss-1))
-               pow(i,j)=real(z*conjg(z))
-            enddo
-
-            iloc=maxloc(pow(:,j))-1
-            irxsync(j)=iloc(1)
-            pt=pt+pow(is13(j),j)              !signal plus noise
-            pa=pa+sum(pow(:,j))               !signal plus 4*noise
-         enddo
-
-         snrdb=-99.9
-         pn=(pa-pt)/3.0
-         if(pn.gt.0.) snrdb=db(pt/pn)
-         nsync=count(is13.eq.irxsync)         ! nsync is the number of correct hard-decoded sync tones.
-         cand(ncand)%snrdb=snrdb
-
-         if(ichan.eq.0) then
-            gate_ok=nsync.ge.QSO_GATE_NSYNC .and. snrdb.ge.smin
-         else
-            gate_ok=nsync.ge.WIDE_GATE_NSYNC .and. snrdb.ge.WIDE_GATE_SNR
-         endif
-         if(.not.gate_ok) cycle
-         xdt_grid=cand(ncand)%xdt
-         f_grid=cand(ncand)%f1
-         nsync_grid=nsync
-         snr_grid=snrdb
-         if(GATE_FIRST .and. (COHERENT_PEAKUP .or. ichan.eq.0)) then
-            call refine_pick(cand(ncand)%xdt,cand(ncand)%f1)
-            a=0.
-            a(1)=-cand(ncand)%f1
-            call twkfreq(c0,c1,nchunk6,6000.0,a)
-         endif
-
-! looks like a real candidate - try to decode
-         call decode_and_merge(ic, decoded_ok)
-         if(.not.decoded_ok .and. FALLBACK_GRID_NSYNC.gt.0 .and. &
-              nsync_grid.ge.FALLBACK_GRID_NSYNC .and. snr_grid.ge.FALLBACK_GRID_SNR .and. &
-              (abs(cand(ncand)%xdt-xdt_grid).gt.0.5*dt .or. &
-              abs(cand(ncand)%f1-f_grid).gt.0.01)) then
-            cand(ncand)%xdt=xdt_grid
-            cand(ncand)%f1=f_grid
-            a=0.
-            a(1)=-f_grid
-            call twkfreq(c0,c1,nchunk6,6000.0,a)
-            prune_fallback=.true.
-            call decode_and_merge(ic, decoded_ok)
-            prune_fallback=.false.
-         endif
-         if(decoded_ok) call record_ch0_success()
-         if(decoded_ok) channel_decoded=.true.
+         call try_pick(ic,.false.)
       enddo     ! candidate loop
+      if(EXTRA_CANDIDATES.gt.0) call extra_picks()
 
       if(.not.channel_decoded .and. .not.PREDICT_CONTINUATIONS) then
          ! Sticky-sync retry: nothing decoded this call. If an active
@@ -1337,6 +1307,141 @@ contains
          enddo
       endif
    end subroutine process_channel
+
+   subroutine extra_picks()
+      ! Up to EXTRA_CANDIDATES picks by prominence once the power budget is spent.
+      real, allocatable :: ridge(:),den(:),prom(:,:),col(:)
+      logical, allocatable :: live(:),need(:)
+      integer :: j,ie,lc(2),ncol,k90
+
+      if(.not.any(mask0(ja:jb,0:nstep_search))) return
+      allocate(ridge(jam:jbm),den(jam:jbm),prom(jam:jbm,0:nstep_surface), &
+           col(nstep_surface+1),live(jam:jbm),need(jam:jbm))
+      ncol=nstep_surface+1
+      k90=max(1,nint(0.9*ncol))
+      do j=jam,jbm
+         live(j)=any(mask0(j,0:nstep_surface))
+      enddo
+      do j=jam,jbm
+         need(j)=any(live(max(jam,j-2):min(jbm,j+2)))
+      enddo
+      ridge=0.
+      do j=jam,jbm
+         if(.not.need(j)) cycle
+         col=s0(j,0:nstep_surface)
+         call select_kth(col,ncol,k90,ridge(j))
+      enddo
+      prom=0.
+      do j=jam,jbm
+         if(.not.live(j)) cycle
+         den(j)=max(sync_level(j),maxval(ridge(max(jam,j-2):min(jbm,j+2))))
+         if(den(j).le.0.0) den(j)=1.0e-30
+         prom(j,:)=s0(j,0:nstep_surface)/den(j)
+      enddo
+      do ie=1,EXTRA_CANDIDATES
+         do
+            lc=maxloc(prom,mask=mask0(jam:jbm,0:nstep_surface))
+            if(lc(1).lt.1) exit
+            jpk=lc(1)-1+jam
+            ipk=lc(2)-1
+            if(ipk.gt.nstep_search .or. jpk.lt.ja .or. jpk.gt.jb) then
+               mask0(max(jam,jpk-nfz_hold):min(jbm,jpk+nfz_hold), &
+                    max(0,ipk-SYNC_EDGE_STEPS):min(nstep_surface,ipk+SYNC_EDGE_STEPS))=.false.
+               cycle
+            endif
+            mask0(max(jam,jpk+1-nfz):min(jbm,jpk+1+nfz), &
+                 max(0,ipk+1-ntz):min(nstep_surface,ipk+1+ntz))=.false.
+            if(ichan.ne.0) &
+                 s0(max(ja,jpk+1-nfz):min(jb,jpk+1+nfz), &
+                 max(0,ipk+1-ntz):min(nstep_surface,ipk+1+ntz))=0.0
+            exit
+         enddo
+         if(lc(1).lt.1) exit
+         call try_pick(nc0+ie,.true.)
+      enddo
+      deallocate(ridge,den,prom,col,live,need)
+   end subroutine extra_picks
+
+   subroutine try_pick(ic,is_extra)
+      ! Gate, peak up and decode the pick at (jpk,ipk).
+      integer, intent(in) :: ic
+      logical, intent(in) :: is_extra
+      fbest   = jpk*df2
+      xdtbest = ipk*dt*12
+
+      if(.not.GATE_FIRST) call refine_pick(xdtbest,fbest)
+
+      if(ncand .ge. MAXCAND) return
+      ncand=ncand+1
+      cand(ncand)%xdt=xdtbest
+      cand(ncand)%f1=fbest
+
+      a=0.
+      a(1)=-cand(ncand)%f1                                !Shift peak to zero frequency
+      call twkfreq(c0,c1,nchunk6,6000.0,a)
+
+      pt=0.
+      pa=0.
+      pow=0.0
+      do j=1,NSYNC_SYM                                ! find tone powers for sync symbols
+         i0=nint(cand(ncand)%xdt/dt) + (j-1)*nss
+         if(i0+nss.gt.nchunk6) exit
+
+         do i=0,3
+            z = dot_product(ctones(0:nss-1,i), c1(i0:i0+nss-1))
+            pow(i,j)=real(z*conjg(z))
+         enddo
+
+         iloc=maxloc(pow(:,j))-1
+         irxsync(j)=iloc(1)
+         pt=pt+pow(is13(j),j)              !signal plus noise
+         pa=pa+sum(pow(:,j))               !signal plus 4*noise
+      enddo
+
+      snrdb=-99.9
+      pn=(pa-pt)/3.0
+      if(pn.gt.0.) snrdb=db(pt/pn)
+      nsync=count(is13.eq.irxsync)         ! nsync is the number of correct hard-decoded sync tones.
+      cand(ncand)%snrdb=snrdb
+
+      if(ichan.eq.0) then
+         gate_ok=nsync.ge.QSO_GATE_NSYNC .and. snrdb.ge.smin
+      else
+         gate_ok=nsync.ge.WIDE_GATE_NSYNC .and. snrdb.ge.WIDE_GATE_SNR
+      endif
+      if(is_extra) gate_ok=gate_ok .and. nsync.ge.EXTRA_GATE_NSYNC
+      if(.not.gate_ok) return
+      xdt_grid=cand(ncand)%xdt
+      f_grid=cand(ncand)%f1
+      nsync_grid=nsync
+      snr_grid=snrdb
+      if(GATE_FIRST .and. (COHERENT_PEAKUP .or. ichan.eq.0)) then
+         call refine_pick(cand(ncand)%xdt,cand(ncand)%f1)
+         a=0.
+         a(1)=-cand(ncand)%f1
+         call twkfreq(c0,c1,nchunk6,6000.0,a)
+      endif
+
+! looks like a real candidate - try to decode
+      if(is_extra) merge_mode=MODE_EXTRA
+      call decode_and_merge(ic, decoded_ok)
+      if(.not.decoded_ok .and. FALLBACK_GRID_NSYNC.gt.0 .and. &
+           nsync_grid.ge.FALLBACK_GRID_NSYNC .and. snr_grid.ge.FALLBACK_GRID_SNR .and. &
+           (abs(cand(ncand)%xdt-xdt_grid).gt.0.5*dt .or. &
+           abs(cand(ncand)%f1-f_grid).gt.0.01)) then
+         cand(ncand)%xdt=xdt_grid
+         cand(ncand)%f1=f_grid
+         a=0.
+         a(1)=-f_grid
+         call twkfreq(c0,c1,nchunk6,6000.0,a)
+         prune_fallback=.true.
+         call decode_and_merge(ic, decoded_ok)
+         prune_fallback=.false.
+      endif
+      merge_mode=MODE_BLIND
+      if(decoded_ok) call record_ch0_success()
+      if(decoded_ok) channel_decoded=.true.
+   end subroutine try_pick
 
    logical function continues_active(candidate)
       ! The candidate continues (not duplicates) an open message.
@@ -1520,6 +1625,7 @@ contains
       enddo
       if(nsymerrs.gt.MAX_SYMBOL_ERRORS) return
       if(merge_mode.eq.MODE_BACK .and. nsymerrs.gt.BACK_MAX_SYMBOL_ERRORS) return
+      if(merge_mode.eq.MODE_EXTRA .and. nsymerrs.gt.EXTRA_MAX_SYMBOL_ERRORS) return
 
       ndecodes=ndecodes+1
       do j = 1, NCHAN_SYM
