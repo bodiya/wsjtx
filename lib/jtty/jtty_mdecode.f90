@@ -33,6 +33,7 @@ module jtty_mdec
   type :: frame_fingerprint
      real :: f1 = 0.0
      real :: tsync = 0.0
+     character(len=80) :: decoded = ''
   end type frame_fingerprint
 
   type :: message_update
@@ -45,6 +46,8 @@ module jtty_mdec
 
   ! Subtract frames decoded in earlier windows before searching a later one.
   logical, parameter        :: PRESUBTRACT_DECODED = .true.
+  ! The same word within this many Hz of a recent frame is that frame (a sidelobe).
+  real, parameter           :: SAME_WORD_FREQ_TOLERANCE = 32.0
   ! Peaks up to SYNC_EDGE_STEPS 2 ms columns past the window or SYNC_HOLD_HZ past
   ! a channel are held: they suppress picks near them but are not tried.
   integer, parameter        :: SYNC_EDGE_STEPS = 12
@@ -392,6 +395,13 @@ contains
             is_recent_frame=.true.
             return
          endif
+         if(candidate%decoded.eq.recent_frames(i)%decoded .and. &
+              abs(candidate%f1-recent_frames(i)%f1).lt.SAME_WORD_FREQ_TOLERANCE .and. &
+              abs(candidate%tsync-recent_frames(i)%tsync).lt. &
+              FRAME_HISTORY_TIME_TOLERANCE) then
+            is_recent_frame=.true.
+            return
+         endif
       enddo
   end function is_recent_frame
 
@@ -406,6 +416,7 @@ contains
       endif
       recent_frames(nrecent)%f1=candidate%f1
       recent_frames(nrecent)%tsync=candidate%tsync
+      recent_frames(nrecent)%decoded=candidate%decoded
   end subroutine remember_recent_frame
 
   subroutine queue_message_update(message,complete)
