@@ -43,6 +43,8 @@ module jtty_mdec
      logical :: complete = .false.
   end type message_update
 
+  ! Refuse a decode that disagrees with its re-encoded frame on more symbols.
+  integer, parameter        :: MAX_SYMBOL_ERRORS = 30
   integer, parameter        :: MAX_DECODES = 100
   integer, parameter        :: MAX_ACTIVE_MESSAGES = 30
   integer, parameter        :: MAX_RECENT_FRAMES = MAX_ACTIVE_MESSAGES*MAX_FRAMES
@@ -1029,6 +1031,7 @@ contains
       logical               :: have_win,accepted,source_valid
       integer               :: gap,best_gap
       type(message_assembly) :: accepted_message
+      real                  :: psync(0:3)
 
       decoded_ok=.false.
       payload_start=nint(cand(ncand)%xdt/dt) + NSYNC_SYM*nss
@@ -1048,16 +1051,33 @@ contains
            cand(ncand)%is_last_frame,source_valid)
       if(.not.source_valid) return
 
-      ndecodes=ndecodes+1
       ! Re-encode the decoded payload to recover the expected tone
       ! per symbol, for the symbol-error-count/SNR diagnostic below
       ! (mirrors what the old LDPC path got for free from its own
       ! codeword bits).
       call jtty_tbcc_reencode_for_subtraction(final_payload, tone_symbols_chk)
-      nsymerrs=13-nsync
+      nsymerrs=0
+      do j=1,NSYNC_SYM
+         i0=nint(cand(ncand)%xdt/dt) + (j-1)*nss
+         if(i0+nss.gt.nchunk6) then
+            nsymerrs=nsymerrs+1
+            cycle
+         endif
+         do i=0,3
+            z=dot_product(ctones(0:nss-1,i),c1(i0:i0+nss-1))
+            psync(i)=real(z*conjg(z))
+         enddo
+         iloc=maxloc(psync)-1
+         if(iloc(1).ne.is13(j)) nsymerrs=nsymerrs+1
+      enddo
+      do j = 1, NCHAN_SYM
+         if(tone_symbols_chk(j).ne.irxchan(j)) nsymerrs=nsymerrs+1
+      enddo
+      if(nsymerrs.gt.MAX_SYMBOL_ERRORS) return
+
+      ndecodes=ndecodes+1
       do j = 1, NCHAN_SYM
          is=tone_symbols_chk(j)
-         if(is.ne.irxchan(j)) nsymerrs=nsymerrs+1
          pt=pt+pow(is,j)
          pa=pa+sum(pow(:,j))
       enddo
