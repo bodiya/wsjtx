@@ -55,6 +55,13 @@ module jtty_mdec
   ! Gate on the search grid's estimate; peak up only the picks that pass.
   logical, parameter        :: GATE_FIRST = .true.
   logical, parameter        :: COHERENT_PEAKUP = .true.
+  ! Try each open message's next frames where they are due, before the blind
+  ! search and without its sync gate (else the sticky-sync retry).
+  logical, parameter        :: PREDICT_CONTINUATIONS = .true.
+  integer, parameter        :: PREDICT_MISSING = 2
+  ! Try up to BACK_DEPTH frame periods before a message's first frame.
+  integer, parameter        :: BACK_DEPTH = 3
+  integer, parameter        :: BACK_MAX_SYMBOL_ERRORS = 26
   ! Retry a pick that fails at its peaked-up point at the grid point, with the
   ! reserved bit pruned, if the grid's gate reads FALLBACK_GRID_NSYNC and _SNR.
   integer, parameter        :: FALLBACK_GRID_NSYNC = 9
@@ -101,6 +108,20 @@ module jtty_mdec
   real                      :: subtracted_f1(MAX_SUBTRACTED) = 0.0
   real                      :: subtracted_tsync(MAX_SUBTRACTED) = 0.0
   integer                   :: subtracted_payload(PAYLOAD_BITS,MAX_SUBTRACTED) = 0
+  ! Back tries (see jtty_mdecode_step).
+  integer, parameter        :: MAX_OPENED = 16
+  integer                   :: nopened = 0
+  integer(int64)            :: opened_id(MAX_OPENED) = 0_int64
+  real                      :: opened_f1(MAX_OPENED) = 0.0
+  real                      :: opened_tsync(MAX_OPENED) = 0.0
+  integer                   :: opened_depth(MAX_OPENED) = 0
+  logical                   :: back_pending = .false.
+  integer(int64)            :: back_id = 0_int64
+  real                      :: back_f1 = 0.0
+  real                      :: back_tsync = 0.0
+  logical                   :: back_decoded = .false.
+  real                      :: back_decoded_f1 = 0.0
+  real                      :: back_decoded_tsync = 0.0
   ! Frames decoded so far that may still overlap a window yet to be searched.
   integer                   :: nknown = 0
   real                      :: known_f1(MAX_RECENT_FRAMES) = 0.0
@@ -429,6 +450,7 @@ contains
          index=pending_first+i
          if(pending_updates(index)%message_id.eq.message%message_id) then
             pending_updates(index)%f1=message%f1
+            pending_updates(index)%start_tsync=message%start_tsync
             pending_updates(index)%decoded=message%decoded
             pending_updates(index)%complete=complete
             return
@@ -538,6 +560,58 @@ contains
       if(candidate%is_last_frame) call remove_active_message(index)
       accepted=.true.
   end subroutine append_active_message
+
+  subroutine prepend_message(id,candidate,accepted,text,still_open)
+      ! Put a back frame in front of message id, open or still pending.
+      integer(int64), intent(in) :: id
+      type(decode), intent(in) :: candidate
+      logical, intent(out) :: accepted
+      character(len=80), intent(out) :: text
+      logical, intent(out) :: still_open
+      integer :: i,index
+
+      accepted=.false.
+      text=''
+      still_open=.false.
+      do i=1,nactive
+         if(active_messages(i)%message_id.ne.id) cycle
+         active_messages(i)%decoded=joined_front(candidate,active_messages(i)%decoded)
+         active_messages(i)%k=len_trim(active_messages(i)%decoded)
+         active_messages(i)%start_tsync=candidate%tsync
+         call queue_message_update(active_messages(i),.false.)
+         call remember_recent_frame(candidate)
+         text=active_messages(i)%decoded
+         still_open=.true.
+         accepted=.true.
+         return
+      enddo
+      do i=0,npending-1
+         index=pending_first+i
+         if(pending_updates(index)%message_id.ne.id) cycle
+         pending_updates(index)%decoded=joined_front(candidate,pending_updates(index)%decoded)
+         pending_updates(index)%start_tsync=candidate%tsync
+         call remember_recent_frame(candidate)
+         text=pending_updates(index)%decoded
+         still_open=.not.pending_updates(index)%complete
+         accepted=.true.
+         return
+      enddo
+  end subroutine prepend_message
+
+  pure function joined_front(candidate,body) result(text)
+      type(decode), intent(in) :: candidate
+      character(len=*), intent(in) :: body
+      character(len=80) :: text
+      character(len=80) :: rest
+
+      rest=body
+      if(rest(1:5).eq.'~599 ') rest=rest(2:)
+      if(candidate%trailing_sep) then
+         text=trim(candidate%decoded)//' '//trim(rest)
+      else
+         text=trim(candidate%decoded)//trim(rest)
+      endif
+  end function joined_front
 
   subroutine prune_receive_state(forward_tsync,frame_period)
       real, intent(in) :: forward_tsync,frame_period
@@ -735,6 +809,9 @@ contains
       real                           :: xdt_grid, f_grid, snr_grid
       integer                        :: nsync_grid
       logical                        :: prune_fallback
+      logical                        :: use_back
+      integer                        :: merge_mode
+      integer, parameter             :: MODE_BLIND=0, MODE_PREDICT=1, MODE_BACK=2
       real                            :: use_interferer_f1, use_interferer_tsync
       integer                         :: use_interferer_payload(PAYLOAD_BITS)
 
@@ -746,12 +823,16 @@ contains
       use_interferer_tsync=interferer_tsync
       use_interferer_payload=interferer_payload
       interferer_pending=.false.
+      use_back=back_pending
+      back_pending=.false.
+      back_decoded=.false.
+      merge_mode=MODE_BLIND
       prune_fallback=.false.
       nsubtracted=0
 
       nsync=0
 
-      if(istart.eq.istart0 .and. .not.use_interferer) then
+      if(istart.eq.istart0 .and. .not.use_interferer .and. .not.use_back) then
          ndecodes=0
          call reset_decode_search_state()
       endif
@@ -839,6 +920,11 @@ contains
          enddo
       endif
 
+      if(use_back) then
+         call try_back()
+         return
+      endif
+
 ! Look for up to 2 sync candidates in each quarter-frame (0.424 second) by 2*FTol rectangle in
 ! the time/frequency plane. Find the peak in the search rectangle, then zero a small region
 ! of size nfz by ntz centered on the peak location and find the location of the next peak.
@@ -866,6 +952,10 @@ contains
       ! full up-to-2-pass sweep to completion, accumulating n_ch0_ok across
       ! both passes, before channels 1/2 (Phase B) ever run.
       n_ch0_ok=0
+      if(PREDICT_CONTINUATIONS) then
+         call try_predictions()
+         any_subtracted=.false.
+      endif
       do ipass=1,2
          if(ipass.eq.2 .and. .not.any_subtracted) exit
          if(.not.s0_valid) call build_s0()
@@ -1211,7 +1301,7 @@ contains
          if(decoded_ok) channel_decoded=.true.
       enddo     ! candidate loop
 
-      if(.not.channel_decoded) then
+      if(.not.channel_decoded .and. .not.PREDICT_CONTINUATIONS) then
          ! Sticky-sync retry: nothing decoded this call. If an active
          ! message's continuation frame is due almost exactly one frame
          ! period ago, retry the FEC decode directly at that remembered
@@ -1247,6 +1337,103 @@ contains
          enddo
       endif
    end subroutine process_channel
+
+   logical function continues_active(candidate)
+      ! The candidate continues (not duplicates) an open message.
+      type(decode), intent(in) :: candidate
+      integer :: i,gap
+      logical :: m,wd
+
+      continues_active=.false.
+      do i=1,nactive
+         call classify_active_candidate(active_messages(i),candidate, &
+              nframe6/6000.0,m,wd,gap)
+         if(m .and. .not.wd) then
+            continues_active=.true.
+            return
+         endif
+      enddo
+   end function continues_active
+
+   subroutine try_predictions()
+      ! Decode each open message's next frames due in this window.
+      integer, parameter :: MAXP=3*MAX_ACTIVE_MESSAGES
+      integer :: np,ip,n
+      real :: pf(MAXP),pt0(MAXP)
+      real :: tw0,tw1,frame_s,tp
+      logical :: ok
+
+      tw0=(istart-1)/12000.0
+      tw1=tw0+ntstep/6000.0
+      frame_s=nframe6/6000.0
+      np=0
+      do ip=1,nactive
+         do n=1,1+PREDICT_MISSING
+            tp=active_messages(ip)%tsync+n*frame_s
+            if(tp.lt.tw0 .or. tp.ge.tw1) cycle
+            if(np.ge.MAXP) exit
+            np=np+1
+            pf(np)=active_messages(ip)%f1
+            pt0(np)=tp
+         enddo
+      enddo
+      if(np.eq.0) return
+      merge_mode=MODE_PREDICT
+      ipass=0
+      do ip=1,np
+         if(ncand.ge.MAXCAND) exit
+         ichan=1
+         if(abs(pf(ip)-f0).le.ftol) ichan=0
+         ncand=ncand+1
+         call decode_at_and_peaked(pt0(ip)-tw0,pf(ip),-2,ok)
+         if(ok) call record_ch0_success()
+      enddo
+      merge_mode=MODE_BLIND
+   end subroutine try_predictions
+
+   subroutine decode_at_and_peaked(xdt_at,f_at,label,ok)
+      ! Decode at the given point, then at the peaked-up point if it differs.
+      real, intent(in) :: xdt_at,f_at
+      integer, intent(in) :: label
+      logical, intent(out) :: ok
+      real :: xr,fr
+
+      cand(ncand)%xdt=xdt_at
+      cand(ncand)%f1=f_at
+      a=0.
+      a(1)=-f_at
+      call twkfreq(c0,c1,nchunk6,6000.0,a)
+      nsync=label
+      call decode_and_merge(label,ok)
+      if(ok) return
+      xr=xdt_at
+      fr=f_at
+      call refine_pick(xr,fr)
+      if(xr.lt.0.0) return
+      if(abs(xr-xdt_at).le.0.5*dt .and. abs(fr-f_at).le.0.01) return
+      cand(ncand)%xdt=xr
+      cand(ncand)%f1=fr
+      a=0.
+      a(1)=-fr
+      call twkfreq(c0,c1,nchunk6,6000.0,a)
+      call decode_and_merge(label,ok)
+   end subroutine decode_at_and_peaked
+
+   subroutine try_back()
+      ! The back try requested by jtty_mdecode_step.
+      logical :: ok
+
+      ncand=0
+      n_ch0_ok=0
+      ipass=0
+      ichan=1
+      if(abs(back_f1-f0).le.ftol) ichan=0
+      if(back_tsync-(istart-1)/12000.0.lt.0.0) return
+      merge_mode=MODE_BACK
+      ncand=1
+      call decode_at_and_peaked(back_tsync-(istart-1)/12000.0,back_f1,-3,ok)
+      merge_mode=MODE_BLIND
+   end subroutine try_back
 
    subroutine refine_pick(xdt_pick,f_pick)
       ! jtty_peakup uses c1 as its work array.
@@ -1332,6 +1519,7 @@ contains
          if(tone_symbols_chk(j).ne.irxchan(j)) nsymerrs=nsymerrs+1
       enddo
       if(nsymerrs.gt.MAX_SYMBOL_ERRORS) return
+      if(merge_mode.eq.MODE_BACK .and. nsymerrs.gt.BACK_MAX_SYMBOL_ERRORS) return
 
       ndecodes=ndecodes+1
       do j = 1, NCHAN_SYM
@@ -1363,6 +1551,19 @@ contains
          enddo
       endif
       if(dupe) return
+      if(merge_mode.eq.MODE_PREDICT) then
+         ! A prediction's frame only continues an open message.
+         if(.not.continues_active(cand(ncand))) then
+            decoded_ok=.false.
+            return
+         endif
+      else if(merge_mode.eq.MODE_BACK) then
+         ! A last frame, or one already decoded, never goes in front of a message.
+         if(cand(ncand)%is_last_frame .or. is_recent_frame(cand(ncand))) then
+            decoded_ok=.false.
+            return
+         endif
+      endif
 
       ! Subtract this signal from c0 so a second, weaker one underneath can
       ! be found by a follow-up sweep over the residual (see the ipass loop
@@ -1384,6 +1585,24 @@ contains
       endif
 
       dec=cand(ncand)
+      if(merge_mode.eq.MODE_BACK) then
+         call prepend_message(back_id,dec,back_decoded,msg,accepted)
+         decoded_ok=back_decoded
+         if(.not.back_decoded) return
+         back_decoded_f1=dec%f1
+         back_decoded_tsync=dec%tsync
+         if(nknown.lt.MAX_RECENT_FRAMES) then
+            nknown=nknown+1
+            known_f1(nknown)=dec%f1
+            known_tsync(nknown)=dec%tsync
+            known_payload(:,nknown)=final_payload
+         endif
+         ! Print the whole message, as for a continuation.
+         if(ndebug.gt.0) write(*,3002) ichan,ipass,ic_label,ndecodes,merge(1,0,accepted), &
+              nactive,.true.,use_interferer,dec%f1,dec%xdt,dec%tsync,nint(dec%snrdb-20.0), &
+              nsync,nsymerrs,trim(display_message_text(msg))
+         return
+      endif
       match=.false.
       is_pure_dupe=is_recent_frame(dec)
       iactive=0
@@ -1435,6 +1654,13 @@ contains
          call start_message(dec,accepted_message,accepted)
          if(.not.accepted) return
          msg=accepted_message%decoded
+         if(BACK_DEPTH.gt.0 .and. nopened.lt.MAX_OPENED) then
+            nopened=nopened+1
+            opened_id(nopened)=accepted_message%message_id
+            opened_f1(nopened)=dec%f1
+            opened_tsync(nopened)=dec%tsync
+            opened_depth(nopened)=0
+         endif
          if(dec%is_last_frame) then
             iactive=0
          else
@@ -1476,12 +1702,16 @@ contains
       real                       :: f1_local(MAX_SUBTRACTED)
       real                       :: tsync_local(MAX_SUBTRACTED)
       integer                    :: payload_local(PAYLOAD_BITS,MAX_SUBTRACTED)
+      integer                    :: m, istart_b
+      real                       :: t_back
 
       nframe=59*nsps
       step=nframe/4
       call prune_receive_state((istart-1)/12000.0,nframe/12000.0)
 
       interferer_pending=.false.   ! defensive: no stale interferer input
+      back_pending=.false.
+      nopened=0
       call jtty_mdecode(istart,istart0,iwave(istart),nchunk,nsps,ndebug,nfa,nfb, &
            f0,ftol,smin)
 
@@ -1505,6 +1735,32 @@ contains
             call jtty_mdecode(istart_prev,istart0,iwave(istart_prev),nchunk,nsps, &
                  ndebug,nfa,nfb,f0,ftol,smin)
          enddo
+      enddo
+
+! Back tries: decode one frame period before each frame that opened a message.
+      i=1
+      do while(i.le.nopened)
+         if(opened_depth(i).lt.BACK_DEPTH) then
+            t_back=opened_tsync(i)-nframe/12000.0
+            m=ceiling((real(istart-1)-t_back*12000.0)/real(step))
+            istart_b=istart-m*step
+            if(t_back.ge.0.0 .and. istart_b.ge.max(1,istart0)) then
+               back_pending=.true.
+               back_id=opened_id(i)
+               back_f1=opened_f1(i)
+               back_tsync=t_back
+               call jtty_mdecode(istart_b,istart0,iwave(istart_b),nchunk,nsps, &
+                    ndebug,nfa,nfb,f0,ftol,smin)
+               if(back_decoded .and. nopened.lt.MAX_OPENED) then
+                  nopened=nopened+1
+                  opened_id(nopened)=opened_id(i)
+                  opened_f1(nopened)=back_decoded_f1
+                  opened_tsync(nopened)=back_decoded_tsync
+                  opened_depth(nopened)=opened_depth(i)+1
+               endif
+            endif
+         endif
+         i=i+1
       enddo
 
       return
