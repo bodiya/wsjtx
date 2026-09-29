@@ -25,7 +25,7 @@ subroutine rjtty_core(iwave,kz,nsps,nfa,nfb,f0,ftol,istart0,istop)
 
   nframe = 59*nsps
   nchunk = nframe + nframe/4
-  smin=4.6
+  smin=2.6        !Channel 0's sync gate, behind the candidate floor
 
   ! A shorter/new buffer always restarts; a windowed call whose window has
   ! moved (a new click) also restarts, even mid-buffer, so active assemblies

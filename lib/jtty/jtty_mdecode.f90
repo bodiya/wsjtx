@@ -60,6 +60,9 @@ module jtty_mdec
   integer, parameter        :: WIDE_CANDIDATES = 8
   ! Refuse a decode that disagrees with its re-encoded frame on more symbols.
   integer, parameter        :: MAX_SYMBOL_ERRORS = 30
+  integer, parameter        :: QSO_GATE_NSYNC = 7
+  integer, parameter        :: WIDE_GATE_NSYNC = 7
+  real, parameter           :: WIDE_GATE_SNR = 3.3
   integer, parameter        :: MAX_DECODES = 100
   integer, parameter        :: MAX_ACTIVE_MESSAGES = 30
   integer, parameter        :: MAX_RECENT_FRAMES = MAX_ACTIVE_MESSAGES*MAX_FRAMES
@@ -709,6 +712,7 @@ contains
       logical                        :: any_subtracted
       logical                        :: s0_valid
       real                           :: sync_floor
+      logical                        :: gate_ok
       integer                        :: ir
       type(decode)                   :: cand(MAXCAND)     !Candidates for decoding
       type(decode)                   :: dec               !Current successful decode
@@ -1152,8 +1156,12 @@ contains
          nsync=count(is13.eq.irxsync)         ! nsync is the number of correct hard-decoded sync tones.
          cand(ncand)%snrdb=snrdb
 
-         if( ichan.eq.0 .and. (nsync .le. 6 .or. snrdb .lt. smin)) cycle
-         if( ichan.ne.0 .and. (nsync .le. 8 .or. snrdb .lt. 5.0)) cycle
+         if(ichan.eq.0) then
+            gate_ok=nsync.ge.QSO_GATE_NSYNC .and. snrdb.ge.smin
+         else
+            gate_ok=nsync.ge.WIDE_GATE_NSYNC .and. snrdb.ge.WIDE_GATE_SNR
+         endif
+         if(.not.gate_ok) cycle
          if(GATE_FIRST .and. (COHERENT_PEAKUP .or. ichan.eq.0)) then
             call refine_pick(cand(ncand)%xdt,cand(ncand)%f1)
             a=0.
