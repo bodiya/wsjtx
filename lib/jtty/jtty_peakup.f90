@@ -144,3 +144,77 @@ subroutine jtty_peakup(c0,c1,csync,nchunk,nss,xdt0,f0,xdt,f1,snr)
    snr=pmax
    return
 end subroutine jtty_peakup
+
+subroutine jtty_peakup_coherent(c0,nchunk,nss,csync,xdt0,f0,xdt,f1,snr)
+
+! Refine a candidate's sync start and tone-0 frequency by combining the 13
+! sync correlations coherently over +-4 ms and +-2.5 Hz (0.05 Hz sub-grid).
+
+   implicit none
+   integer, intent(in) :: nchunk, nss
+   complex, intent(in) :: c0(0:nchunk-1)                        !Complex data at 6000 S/s
+   complex, intent(in) :: csync(0:13*nss-1)
+   real, intent(in)    :: xdt0, f0
+   real, intent(out)   :: xdt, f1, snr
+   integer, parameter  :: hop=4
+   real, parameter     :: TWOPI = 6.283185307179586
+   real, parameter     :: DT = 1.0/6000.0
+   complex, allocatable, save :: cw(:)
+   complex             :: z(0:12), rot(0:12,-5:5), acc
+   real                :: a(3), p, pmax, tk
+   integer             :: ia, ib, i0, idf, k, m, st, nspan, bi0, bidf, bm
+
+   xdt=xdt0
+   f1=f0
+   snr=0.
+   ia=max(0,nint((xdt0-0.004)/DT))
+   ib=nint((xdt0+0.004)/DT)
+   ! Mix only the span the search reads; the phase origin does not matter.
+   nspan=min(nchunk,ib+13*nss)-ia
+   if(nspan.lt.nss) return
+   if(allocated(cw)) then
+      if(size(cw).lt.nspan) deallocate(cw)
+   endif
+   if(.not.allocated(cw)) allocate(cw(0:max(nspan,16*nss)-1))
+   do k=0,12
+      tk=k*nss*DT
+      do m=-5,5
+         rot(k,m)=cmplx(cos(TWOPI*0.05*m*tk),-sin(TWOPI*0.05*m*tk))
+      enddo
+   enddo
+
+   pmax=-1.
+   bi0=nint(xdt0/DT)
+   bidf=0
+   bm=0
+   do idf=-5,5
+      a=0.
+      a(1)=-(f0+0.5*idf)
+      call twkfreq(c0(ia),cw,nspan,6000.0,a)
+      do i0=ia,ib,hop
+         do k=0,12
+            st=i0-ia+k*nss
+            if(st+nss.gt.nspan) then
+               z(k)=0.                               !Symbol past the chunk
+            else
+               z(k)=sum(conjg(csync(k*nss:(k+1)*nss-1))*cw(st:st+nss-1))
+            endif
+         enddo
+         do m=-5,5
+            acc=sum(z*rot(:,m))
+            p=real(acc)**2+aimag(acc)**2
+            if(p.gt.pmax) then
+               pmax=p
+               bi0=i0
+               bidf=idf
+               bm=m
+            endif
+         enddo
+      enddo
+   enddo
+   xdt=bi0*DT
+   f1=f0+0.5*bidf+0.05*bm
+   snr=max(pmax,0.)
+   return
+end subroutine jtty_peakup_coherent
+
