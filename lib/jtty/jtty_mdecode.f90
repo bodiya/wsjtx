@@ -49,6 +49,10 @@ module jtty_mdec
   ! a channel are held: they suppress picks near them but are not tried.
   integer, parameter        :: SYNC_EDGE_STEPS = 12
   real, parameter           :: SYNC_HOLD_HZ = 16.0
+  ! Evaluate channel 0's sync gate on the search grid's estimate and peak up
+  ! only the picks that pass it: jtty_peakup maximises the gate's own
+  ! statistic over 11 frequencies and 3 times, which lifts noise over it.
+  logical, parameter        :: GATE_FIRST = .true.
   ! Refuse a decode that disagrees with its re-encoded frame on more symbols.
   integer, parameter        :: MAX_SYMBOL_ERRORS = 30
   integer, parameter        :: MAX_DECODES = 100
@@ -975,7 +979,7 @@ contains
          fbest   = jpk*df2
          xdtbest = ipk*dt*12
 
-         if(ichan.eq.0) then
+         if(ichan.eq.0 .and. .not.GATE_FIRST) then
             call jtty_peakup(c0,c1,csync,nchunk6, nss, xdtbest, fbest, xdt1, f11, snr0)
             xdtbest=xdt1
             fbest=f11
@@ -1016,6 +1020,15 @@ contains
 
          if( ichan.eq.0 .and. (nsync .le. 6 .or. snrdb .lt. smin)) cycle
          if( ichan.ne.0 .and. (nsync .le. 8 .or. snrdb .lt. 5.0)) cycle
+         if(ichan.eq.0 .and. GATE_FIRST) then
+            call jtty_peakup(c0,c1,csync,nchunk6,nss,cand(ncand)%xdt,cand(ncand)%f1, &
+                 xdt1,f11,snr0)
+            cand(ncand)%xdt=xdt1
+            cand(ncand)%f1=f11
+            a=0.
+            a(1)=-cand(ncand)%f1
+            call twkfreq(c0,c1,nchunk6,6000.0,a)
+         endif
 
 ! looks like a real candidate - try to decode
          call decode_and_merge(ic, decoded_ok)
