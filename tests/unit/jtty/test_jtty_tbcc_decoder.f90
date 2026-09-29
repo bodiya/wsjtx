@@ -48,19 +48,21 @@ program test_jtty_tbcc_decoder
   correlations = cmplx(0.0_real32, 0.0_real32, real32)
   decoded = huge(0_int32)
   call jtty_tbcc_decode(correlations, halves, decoded, success, result)
-  call require(.not.success, 'half-symbol fallback accepted reserved bit one')
+  call require(.not.success, 'half-symbol observations accepted reserved bit one')
   call require(all(decoded == 0_int32), &
        'half-symbol reserved-bit rejection left a stale payload')
 
+  ! The half-symbol rung is off: half-symbol observations alone decode nothing.
   payload(33) = 0_int32
   call tbcc_encode(payload, tones, JTTY_TBCC_PROFILE_1167_1545_80F)
   call make_noiseless_correlations(tones, halves)
   decoded = huge(0_int32)
   call jtty_tbcc_decode(correlations, halves, decoded, success, result)
-  call require(success .and. all(decoded == payload), 'half-symbol fallback failed to rescue payload')
-  call require(result%used_half_symbol_observation .and. result%coherent_block_length == 1, &
-       'half-symbol fallback used the wrong observation or coherence')
-  call require(result%evaluated_rung_count == 4, 'fallback skipped an M1 rung')
+  call require(.not.success, 'ladder decoded from half-symbol observations alone')
+  call require(all(decoded == 0_int32), 'half-symbol-only decode left a stale payload')
+  call require(.not.result%used_half_symbol_observation, &
+       'ladder evaluated the half-symbol rung')
+  call require(result%evaluated_rung_count == 3, 'ladder skipped a coherent rung')
   halves = cmplx(0.0_real32, 0.0_real32, real32)
 
   payload = 0_int32
@@ -70,7 +72,7 @@ program test_jtty_tbcc_decoder
   call jtty_tbcc_decode(correlations, halves, decoded, success, result)
   call require(.not.success, 'coherence ladder accepted the all-zero payload')
   call require(all(decoded == 0_int32), 'failed ladder decode left stale payload')
-  call require(result%evaluated_rung_count == 4_int32, &
+  call require(result%evaluated_rung_count == 3_int32, &
        'failed decode did not report all evaluated rungs')
 
   correlations = cmplx(0.0_real32, 0.0_real32, real32)
@@ -78,7 +80,7 @@ program test_jtty_tbcc_decoder
   call jtty_tbcc_decode(correlations, halves, decoded, success, result)
   call require(.not.success, 'coherence ladder accepted flat correlations')
   call require(all(decoded == 0_int32), 'flat-correlation decode left stale payload')
-  call require(result%evaluated_rung_count == 4_int32, &
+  call require(result%evaluated_rung_count == 3_int32, &
        'flat-correlation decode did not report all evaluated rungs')
 
   call expect_coherent_decodes()

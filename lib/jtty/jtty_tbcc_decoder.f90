@@ -14,6 +14,7 @@ module jtty_tbcc_decoder
 
   ! Check the reserved bit after the walk instead of pruning it in the trellis.
   logical, parameter :: PRUNE_RESERVED_BIT = .false.
+  logical, parameter :: USE_HALF_SYMBOL_RUNG = .false.
 
   type, public :: jtty_tbcc_decode_result
     integer(int32) :: accepted_hypothesis_rank = 0_int32
@@ -95,6 +96,10 @@ contains
       return
     end do
 
+    if (.not.USE_HALF_SYMBOL_RUNG) then
+      result%evaluated_rung_count = int(size(COHERENT_LENGTHS), int32)
+      return
+    end if
     ! Half-symbol energies discard phase, so only L1 is meaningful here.
     call decode_rung(half_correlations, 1, decoded_rung)
     if (decoded_rung%accepted) then
