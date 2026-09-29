@@ -45,6 +45,10 @@ module jtty_mdec
 
   ! Subtract frames decoded in earlier windows before searching a later one.
   logical, parameter        :: PRESUBTRACT_DECODED = .true.
+  ! Peaks up to SYNC_EDGE_STEPS 2 ms columns past the window or SYNC_HOLD_HZ past
+  ! a channel are held: they suppress picks near them but are not tried.
+  integer, parameter        :: SYNC_EDGE_STEPS = 12
+  real, parameter           :: SYNC_HOLD_HZ = 16.0
   ! Refuse a decode that disagrees with its re-encoded frame on more symbols.
   integer, parameter        :: MAX_SYMBOL_ERRORS = 30
   integer, parameter        :: MAX_DECODES = 100
@@ -566,6 +570,7 @@ contains
       integer                        :: irxsync(NSYNC_SYM), irxchan(NCHAN_SYM)
       integer                        :: iactive
       integer                        :: nsloc(2),nfz,ntz,ncand,ic,nc,nstep_search
+      integer                        :: nstep_surface,jam,jbm,jpk,ipk,nfz_hold
       integer                        :: nc0,n_ch0_ok
       integer                        :: ja_ch0_ok(16),jb_ch0_ok(16)
       real                            :: f1_ch0_ok(16),tsync_ch0_ok(16)
@@ -650,10 +655,10 @@ contains
          if(allocated(c1)) deallocate(c1)
            allocate(c1(0:nchunk6-1))
          if(allocated(s0)) deallocate(s0)
-           allocate(s0(0:nh2,0:ntgrid))
+           allocate(s0(0:nh2,0:ntgrid+SYNC_EDGE_STEPS))
          s0=0.
          if(allocated(mask0)) deallocate(mask0)
-           allocate(mask0(0:nh2,0:ntgrid))
+           allocate(mask0(0:nh2,0:ntgrid+SYNC_EDGE_STEPS))
 
 ! Generate complex waveform for sync
          baud=FSAMPLE/real(nss)   !31.25 for nss=192
@@ -827,7 +832,7 @@ contains
          fft_output=>c
       endif
       istep=0
-      do i0=0,ntstep,12                     !Search over quarter-frame segment
+      do i0=0,ntstep+12*SYNC_EDGE_STEPS,12  !Search over quarter-frame segment
          xdt=i0*dt
          if(use_chirp) then
             sync_fft_caches(sync_fft_order)%input(0:NSYNC_SYM*nss-1)= &
@@ -893,7 +898,8 @@ contains
          endif
          istep=istep+1
       enddo
-      nstep_search=istep-1
+      nstep_surface=istep-1
+      nstep_search=nstep_surface-SYNC_EDGE_STEPS
       s0_valid=.true.
    end subroutine build_s0
 
@@ -929,28 +935,45 @@ contains
          ! them, while staying free to catch what channel 0 missed.
          do i=1,n_ch0_ok
             if(max(ja,ja_ch0_ok(i)) .le. min(jb,jb_ch0_ok(i))) &
-                 s0(max(ja,ja_ch0_ok(i)):min(jb,jb_ch0_ok(i)),0:nstep_search) = 0.0
+                 s0(max(ja,ja_ch0_ok(i)):min(jb,jb_ch0_ok(i)),0:nstep_surface) = 0.0
          enddo
       endif
 
-      if(ichan.eq.0) mask0(ja:jb,0:nstep_search)=.true.
+      ! Picks in the margin around the channel only suppress (held peaks).
+      jam=ja
+      jbm=jb
+      nfz_hold=0
+      if(SYNC_EDGE_STEPS.gt.0) then
+         nfz_hold=nint(SYNC_HOLD_HZ/df2)
+         jam=max(first_sync_bin,ja-nfz_hold)
+         jbm=min(last_sync_bin,jb+nfz_hold)
+      endif
+      mask0(jam:jbm,0:nstep_surface)=.true.
 
       do ic=1,nc0
-         if(ichan.eq.0) then
-            ! Channel 0 uses a private mask instead of zeroing s0
-            ! directly, so candidates that never pass the decode gate
-            ! don't eat into channels 1/2's shared search surface.
-            nsloc=maxloc(s0(ja:jb,0:nstep_search), &
-                 mask=mask0(ja:jb,0:nstep_search))
-            mask0( max( ja, nsloc(1)-nfz+ja ) : min( jb, nsloc(1)+nfz+ja  ),  &
-                max(  0, nsloc(2)-ntz )    : min( nstep_search, nsloc(2)+ntz )   ) = .false.
-         else
-            nsloc=maxloc(s0(ja:jb,0:nstep_search))
-            s0( max( ja, nsloc(1)-nfz+ja ) : min( jb, nsloc(1)+nfz+ja  ),        &
-                max(  0, nsloc(2)-ntz )    : min( nstep_search, nsloc(2)+ntz )   ) = 0.0
-         endif
-         fbest   = (nsloc(1)-1+ja)*df2
-         xdtbest = (nsloc(2)-1)*dt*12
+         ! Channel 0 uses a private mask instead of zeroing s0
+         ! directly, so candidates that never pass the decode gate
+         ! don't eat into channels 1/2's shared search surface.
+         do
+            nsloc=maxloc(s0(jam:jbm,0:nstep_surface),mask=mask0(jam:jbm,0:nstep_surface))
+            if(nsloc(1).lt.1) exit              !Nothing left to pick
+            jpk=nsloc(1)-1+jam
+            ipk=nsloc(2)-1
+            if(ipk.gt.nstep_search .or. jpk.lt.ja .or. jpk.gt.jb) then
+               mask0(max(jam,jpk-nfz_hold):min(jbm,jpk+nfz_hold), &
+                    max(0,ipk-SYNC_EDGE_STEPS):min(nstep_surface,ipk+SYNC_EDGE_STEPS))=.false.
+               cycle
+            endif
+            mask0( max( jam, jpk+1-nfz ) : min( jbm, jpk+1+nfz  ),  &
+                max(  0, ipk+1-ntz )    : min( nstep_surface, ipk+1+ntz )   ) = .false.
+            if(ichan.ne.0) &
+                 s0( max( ja, jpk+1-nfz ) : min( jb, jpk+1+nfz  ),        &
+                 max(  0, ipk+1-ntz )    : min( nstep_surface, ipk+1+ntz )   ) = 0.0
+            exit
+         enddo
+         if(nsloc(1).lt.1) exit
+         fbest   = jpk*df2
+         xdtbest = ipk*dt*12
 
          if(ichan.eq.0) then
             call jtty_peakup(c0,c1,csync,nchunk6, nss, xdtbest, fbest, xdt1, f11, snr0)
