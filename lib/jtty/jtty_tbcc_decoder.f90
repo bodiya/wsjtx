@@ -46,17 +46,23 @@ module jtty_tbcc_decoder
 
 contains
 
-  subroutine jtty_tbcc_decode(correlations, half_correlations, payload, success, result)
+  subroutine jtty_tbcc_decode(correlations, half_correlations, payload, success, result, &
+       prune_reserved)
+    ! prune_reserved (optional) overrides PRUNE_RESERVED_BIT for this decode.
     complex(real32), intent(in) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
     complex(real32), intent(in) :: half_correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
     integer(int32), intent(out) :: payload(PAYLOAD_BITS)
     logical, intent(out) :: success
     type(jtty_tbcc_decode_result), intent(out), optional :: result
+    logical, intent(in), optional :: prune_reserved
     type(jtty_tbcc_decode_result) :: local_result
+    logical :: prune
 
+    prune = PRUNE_RESERVED_BIT
+    if (present(prune_reserved)) prune = prune_reserved
     !$omp critical(jtty_tbcc_decoder)
     call initialize_decoders()
-    call decode_ladder(correlations, half_correlations, payload, success, local_result)
+    call decode_ladder(correlations, half_correlations, payload, success, local_result, prune)
     !$omp end critical(jtty_tbcc_decoder)
     if (present(result)) result = local_result
   end subroutine jtty_tbcc_decode
@@ -77,12 +83,13 @@ contains
     decoders_initialized = .true.
   end subroutine initialize_decoders
 
-  subroutine decode_ladder(correlations, half_correlations, payload, success, result)
+  subroutine decode_ladder(correlations, half_correlations, payload, success, result, prune)
     complex(real32), intent(in) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
     complex(real32), intent(in) :: half_correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
     integer(int32), intent(out) :: payload(PAYLOAD_BITS)
     logical, intent(out) :: success
     type(jtty_tbcc_decode_result), intent(out) :: result
+    logical, intent(in) :: prune
     type(jtty_tbcc_rung_result) :: decoded_rung
     integer :: rung
 
@@ -90,7 +97,7 @@ contains
     success = .false.
     result = jtty_tbcc_decode_result()
     do rung = 1, size(COHERENT_LENGTHS)
-      call decode_rung(correlations, rung, decoded_rung)
+      call decode_rung(correlations, rung, prune, decoded_rung)
       if (.not.decoded_rung%accepted) cycle
       call accept_rung(decoded_rung, rung, .false., payload, success, result)
       return
@@ -101,7 +108,7 @@ contains
       return
     end if
     ! Half-symbol energies discard phase, so only L1 is meaningful here.
-    call decode_rung(half_correlations, 1, decoded_rung)
+    call decode_rung(half_correlations, 1, prune, decoded_rung)
     if (decoded_rung%accepted) then
       call accept_rung(decoded_rung, 4, .true., payload, success, result)
     else
@@ -109,9 +116,10 @@ contains
     end if
   end subroutine decode_ladder
 
-  subroutine decode_rung(correlations, coherent_index, rung)
+  subroutine decode_rung(correlations, coherent_index, prune, rung)
     complex(real32), intent(in) :: correlations(0:3, JTTY_TBCC_INFORMATION_BITS)
     integer, intent(in) :: coherent_index
+    logical, intent(in) :: prune
     type(jtty_tbcc_rung_result), intent(out) :: rung
     integer(int32) :: start_states(JTTY_TBCC_MAX_HYPOTHESES)
     real(real64) :: path_metrics(JTTY_TBCC_MAX_HYPOTHESES)
@@ -121,7 +129,7 @@ contains
     call jtty_tbcc_list_wava_optimized(plans(coherent_index), &
          workspaces(coherent_index), correlations, rung%candidates, rung%identities, &
          rung%clean_metrics, path_metrics, start_states, rung%crc_valid, &
-         candidate_count, pool_count, prune_reserved_zero=PRUNE_RESERVED_BIT)
+         candidate_count, pool_count, prune_reserved_zero=prune)
 
     rung%result = jtty_tbcc_decode_result( &
          exported_candidate_count=candidate_count, &

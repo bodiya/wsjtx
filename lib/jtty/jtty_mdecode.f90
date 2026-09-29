@@ -52,6 +52,10 @@ module jtty_mdec
   ! Gate on the search grid's estimate; peak up only the picks that pass.
   logical, parameter        :: GATE_FIRST = .true.
   logical, parameter        :: COHERENT_PEAKUP = .true.
+  ! Retry a pick that fails at its peaked-up point at the grid point, with the
+  ! reserved bit pruned, if the grid's gate reads FALLBACK_GRID_NSYNC and _SNR.
+  integer, parameter        :: FALLBACK_GRID_NSYNC = 9
+  real, parameter           :: FALLBACK_GRID_SNR = 5.0
   ! Try only picks whose sync power is at least the floor times the local noise level.
   real, parameter           :: QSO_SYNC_FLOOR = 11.0
   real, parameter           :: WIDE_SYNC_FLOOR = 13.0
@@ -717,6 +721,9 @@ contains
       type(decode)                   :: cand(MAXCAND)     !Candidates for decoding
       type(decode)                   :: dec               !Current successful decode
       logical                        :: use_interferer
+      real                           :: xdt_grid, f_grid, snr_grid
+      integer                        :: nsync_grid
+      logical                        :: prune_fallback
       real                            :: use_interferer_f1, use_interferer_tsync
       integer                         :: use_interferer_payload(PAYLOAD_BITS)
 
@@ -728,6 +735,7 @@ contains
       use_interferer_tsync=interferer_tsync
       use_interferer_payload=interferer_payload
       interferer_pending=.false.
+      prune_fallback=.false.
       nsubtracted=0
 
       nsync=0
@@ -1162,6 +1170,10 @@ contains
             gate_ok=nsync.ge.WIDE_GATE_NSYNC .and. snrdb.ge.WIDE_GATE_SNR
          endif
          if(.not.gate_ok) cycle
+         xdt_grid=cand(ncand)%xdt
+         f_grid=cand(ncand)%f1
+         nsync_grid=nsync
+         snr_grid=snrdb
          if(GATE_FIRST .and. (COHERENT_PEAKUP .or. ichan.eq.0)) then
             call refine_pick(cand(ncand)%xdt,cand(ncand)%f1)
             a=0.
@@ -1171,6 +1183,19 @@ contains
 
 ! looks like a real candidate - try to decode
          call decode_and_merge(ic, decoded_ok)
+         if(.not.decoded_ok .and. FALLBACK_GRID_NSYNC.gt.0 .and. &
+              nsync_grid.ge.FALLBACK_GRID_NSYNC .and. snr_grid.ge.FALLBACK_GRID_SNR .and. &
+              (abs(cand(ncand)%xdt-xdt_grid).gt.0.5*dt .or. &
+              abs(cand(ncand)%f1-f_grid).gt.0.01)) then
+            cand(ncand)%xdt=xdt_grid
+            cand(ncand)%f1=f_grid
+            a=0.
+            a(1)=-f_grid
+            call twkfreq(c0,c1,nchunk6,6000.0,a)
+            prune_fallback=.true.
+            call decode_and_merge(ic, decoded_ok)
+            prune_fallback=.false.
+         endif
          if(decoded_ok) call record_ch0_success()
          if(decoded_ok) channel_decoded=.true.
       enddo     ! candidate loop
@@ -1257,7 +1282,8 @@ contains
       decoded_ok=.false.
       payload_start=nint(cand(ncand)%xdt/dt) + NSYNC_SYM*nss
       call jtty_correlate_payload_symbols(payload_correlator,c1,payload_start,zsym,zhalf)
-      call jtty_tbcc_decode(zsym,zhalf,final_payload,success_dec)
+      call jtty_tbcc_decode(zsym,zhalf,final_payload,success_dec, &
+           prune_reserved=prune_fallback)
       ! Half-symbol off-tone leakage is not a noise estimate; diagnostics use M1.
       pow=abs(zsym)**2
       do j=1,NCHAN_SYM
