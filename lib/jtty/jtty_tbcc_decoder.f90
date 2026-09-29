@@ -4,13 +4,16 @@ module jtty_tbcc_decoder
   use jtty_tbcc_list_decoder, only: jtty_tbcc_decoder_plan, &
        jtty_tbcc_decoder_workspace, jtty_tbcc_init_decoder_plan, &
        jtty_tbcc_init_decoder_workspace, jtty_tbcc_list_wava_optimized, &
-       JTTY_TBCC_INFORMATION_BITS, JTTY_TBCC_MAX_HYPOTHESES
+       JTTY_TBCC_INFORMATION_BITS, JTTY_TBCC_MAX_HYPOTHESES, JTTY_TBCC_RESERVED_BIT
   use tbcc, only: PAYLOAD_BITS
   implicit none
   private
 
   integer(int32), parameter :: COHERENT_LENGTHS(3) = [1_int32, 2_int32, 4_int32]
   integer(int32), parameter :: CIRCULAR_PASSES = 2_int32
+
+  ! Check the reserved bit after the walk instead of pruning it in the trellis.
+  logical, parameter :: PRUNE_RESERVED_BIT = .false.
 
   type, public :: jtty_tbcc_decode_result
     integer(int32) :: accepted_hypothesis_rank = 0_int32
@@ -113,7 +116,7 @@ contains
     call jtty_tbcc_list_wava_optimized(plans(coherent_index), &
          workspaces(coherent_index), correlations, rung%candidates, rung%identities, &
          rung%clean_metrics, path_metrics, start_states, rung%crc_valid, &
-         candidate_count, pool_count, prune_reserved_zero=.true.)
+         candidate_count, pool_count, prune_reserved_zero=PRUNE_RESERVED_BIT)
 
     rung%result = jtty_tbcc_decode_result( &
          exported_candidate_count=candidate_count, &
@@ -123,6 +126,8 @@ contains
       if (.not.rung%crc_valid(rank)) cycle
       ! Do not expand the fixed false-accept budget past the all-zero sentinel.
       if (all(rung%candidates(1:PAYLOAD_BITS, rank) == 0_int32)) exit
+      ! A set reserved bit fails the check; walk on as for a CRC failure.
+      if (rung%candidates(JTTY_TBCC_RESERVED_BIT, rank) /= 0_int32) cycle
       rung%accepted = .true.
       rung%result%accepted_hypothesis_rank = rank
       rung%result%accepted_identity = rung%identities(rank)

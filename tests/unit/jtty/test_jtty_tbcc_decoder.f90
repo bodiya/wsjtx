@@ -38,6 +38,8 @@ program test_jtty_tbcc_decoder
   call make_noiseless_correlations(tones, correlations)
   decoded = huge(0_int32)
   call jtty_tbcc_decode(correlations, halves, decoded, success, result)
+  ! The trellis leaves bit 33 free, so this CRC-valid word is the first
+  ! hypothesis; the walk must refuse it rather than accept it.
   call require(.not.success, 'coherence ladder accepted reserved bit one')
   call require(all(decoded == 0_int32), &
        'reserved-bit rejection left a stale payload')
@@ -86,9 +88,10 @@ program test_jtty_tbcc_decoder
 contains
 
   subroutine expect_coherent_decodes()
-    ! Seed 6 verifies that reserved-bit pruning retains the valid L1 path.
-    integer(int32), parameter :: seeds(2) = [2,6], lengths(2) = [2,1], &
-         ranks(2) = [2,1], evaluated_rungs(2) = [2,1]
+    ! Seed 6 decoded at L1 while bit 33 was pruned in the trellis; with the
+    ! bit left free (and checked after the CRC) it needs the L4 rung.
+    integer(int32), parameter :: seeds(2) = [2,6], lengths(2) = [2,4], &
+         ranks(2) = [2,1], evaluated_rungs(2) = [2,3]
     integer(int64) :: state
     integer :: fixture, symbol, tone, bit
     real(real32) :: in_phase, quadrature
