@@ -52,6 +52,12 @@ module jtty_mdec
   ! Gate on the search grid's estimate; peak up only the picks that pass.
   logical, parameter        :: GATE_FIRST = .true.
   logical, parameter        :: COHERENT_PEAKUP = .true.
+  ! Try only picks whose sync power is at least the floor times the local noise level.
+  real, parameter           :: QSO_SYNC_FLOOR = 11.0
+  real, parameter           :: WIDE_SYNC_FLOOR = 13.0
+  real, parameter           :: SYNC_LEVEL_HZ = 150.0
+  integer, parameter        :: SYNC_LEVEL_STRIDE = 4
+  integer, parameter        :: WIDE_CANDIDATES = 8
   ! Refuse a decode that disagrees with its re-encoded frame on more symbols.
   integer, parameter        :: MAX_SYMBOL_ERRORS = 30
   integer, parameter        :: MAX_DECODES = 100
@@ -91,6 +97,7 @@ module jtty_mdec
   real                      :: known_tsync(MAX_RECENT_FRAMES) = 0.0
   integer                   :: known_payload(PAYLOAD_BITS,MAX_RECENT_FRAMES) = 0
   complex, allocatable, private :: sync_chirp_weights(:),sync_chirp_kernel(:)
+  real, allocatable, private :: sync_level(:)   !Local noise level of the sync surface, per bin
   integer, private :: sync_chirp_samples=0,sync_chirp_first_bin=-1
   integer, private :: sync_chirp_output_count=0
   type, private :: sync_fft_cache
@@ -243,6 +250,100 @@ contains
       npending=0
       pending_first=1
   end subroutine discard_pending_updates
+
+  subroutine select_median(w,n,med)
+      ! The (upper) median of w(1:n), by Wirth's selection in place.
+      integer, intent(in) :: n
+      real, intent(inout) :: w(n)
+      real, intent(out) :: med
+      real :: pivot,tmp
+      integer :: k,lo,hi,i,j
+
+      med=0.
+      if(n.lt.1) return
+      k=n/2+1
+      lo=1
+      hi=n
+      do while(lo.lt.hi)
+         pivot=w(k)
+         i=lo
+         j=hi
+         do
+            do while(w(i).lt.pivot)
+               i=i+1
+            enddo
+            do while(pivot.lt.w(j))
+               j=j-1
+            enddo
+            if(i.le.j) then
+               tmp=w(i)
+               w(i)=w(j)
+               w(j)=tmp
+               i=i+1
+               j=j-1
+            endif
+            if(i.gt.j) exit
+         enddo
+         if(j.lt.k) lo=i
+         if(k.lt.i) hi=j
+      enddo
+      med=w(k)
+  end subroutine select_median
+
+  subroutine running_median(x,n,nhalf,med)
+      ! med(i) = median of x(i-nhalf:i+nhalf).
+      integer, intent(in) :: n,nhalf
+      real, intent(in) :: x(n)
+      real, intent(out) :: med(n)
+      real :: win(2*nhalf+1)
+      integer :: i,nwin
+
+      nwin=0
+      do i=1,min(n,nhalf)
+         call insert_sorted(x(i))
+      enddo
+      do i=1,n
+         if(i-nhalf-1.ge.1) call remove_sorted(x(i-nhalf-1))
+         if(i+nhalf.le.n) call insert_sorted(x(i+nhalf))
+         med(i)=win(nwin/2+1)
+      enddo
+
+  contains
+
+      integer function first_not_below(v) result(lo)
+         real, intent(in) :: v
+         integer :: hi,mid
+         lo=1
+         hi=nwin+1
+         do while(lo.lt.hi)
+            mid=(lo+hi)/2
+            if(win(mid).lt.v) then
+               lo=mid+1
+            else
+               hi=mid
+            endif
+         enddo
+      end function first_not_below
+
+      subroutine insert_sorted(v)
+         real, intent(in) :: v
+         integer :: k
+         k=first_not_below(v)
+         win(k+1:nwin+1)=win(k:nwin)
+         win(k)=v
+         nwin=nwin+1
+      end subroutine insert_sorted
+
+      subroutine remove_sorted(v)
+         real, intent(in) :: v
+         integer :: k
+         k=first_not_below(v)
+         win(k:nwin-1)=win(k+1:nwin)
+         nwin=nwin-1
+      end subroutine remove_sorted
+
+  end subroutine running_median
+
 
   pure logical function same_frame(f1_a,tsync_a,f1_b,tsync_b)
       real, intent(in) :: f1_a,tsync_a,f1_b,tsync_b
@@ -607,6 +708,7 @@ contains
       logical                        :: channel_decoded, decoded_ok
       logical                        :: any_subtracted
       logical                        :: s0_valid
+      real                           :: sync_floor
       integer                        :: ir
       type(decode)                   :: cand(MAXCAND)     !Candidates for decoding
       type(decode)                   :: dec               !Current successful decode
@@ -662,6 +764,9 @@ contains
          s0=0.
          if(allocated(mask0)) deallocate(mask0)
            allocate(mask0(0:nh2,0:ntgrid+SYNC_EDGE_STEPS))
+         if(allocated(sync_level)) deallocate(sync_level)
+           allocate(sync_level(0:nh2))
+         sync_level=0.
 
 ! Generate complex waveform for sync
          baud=FSAMPLE/real(nss)   !31.25 for nss=192
@@ -904,7 +1009,30 @@ contains
       nstep_surface=istep-1
       nstep_search=nstep_surface-SYNC_EDGE_STEPS
       s0_valid=.true.
+      if(QSO_SYNC_FLOOR.gt.0.0 .or. WIDE_SYNC_FLOOR.gt.0.0) call build_sync_level()
    end subroutine build_s0
+
+   subroutine build_sync_level()
+      ! Local noise level per bin: median over time, then within +-SYNC_LEVEL_HZ.
+      integer, parameter :: NBLOCK=64
+      real, allocatable :: column(:,:),per_bin(:)
+      integer :: jb0,nb,k,nbins,ncol
+
+      nbins=last_sync_bin-first_sync_bin+1
+      ncol=nstep_surface/SYNC_LEVEL_STRIDE+1
+      allocate(column(ncol,NBLOCK),per_bin(nbins))
+      do jb0=first_sync_bin,last_sync_bin,NBLOCK
+         nb=min(NBLOCK,last_sync_bin-jb0+1)
+         do k=1,ncol
+            column(k,1:nb)=s0(jb0:jb0+nb-1,(k-1)*SYNC_LEVEL_STRIDE)
+         enddo
+         do k=1,nb
+            call select_median(column(:,k),ncol,per_bin(jb0-first_sync_bin+k))
+         enddo
+      enddo
+      call running_median(per_bin,nbins,nint(SYNC_LEVEL_HZ/df2), &
+           sync_level(first_sync_bin:last_sync_bin))
+   end subroutine build_sync_level
 
    subroutine channel_window()
       if(ichan.eq.0) then
@@ -927,6 +1055,11 @@ contains
       nc0=nc
       ! A wide QSO band needs more candidates to avoid crowding out its signal.
       if(ichan.eq.0) nc0=max(2, min(8, nint(fwid/(nfz*df2))))
+      sync_floor=QSO_SYNC_FLOOR
+      if(ichan.ne.0) then
+         sync_floor=WIDE_SYNC_FLOOR
+         if(sync_floor.gt.0.0) nc0=WIDE_CANDIDATES
+      endif
       fbest=0.
       xdtbest=0.
       fpk=0.
@@ -951,7 +1084,13 @@ contains
          jam=max(first_sync_bin,ja-nfz_hold)
          jbm=min(last_sync_bin,jb+nfz_hold)
       endif
-      mask0(jam:jbm,0:nstep_surface)=.true.
+      if(sync_floor.gt.0.0) then
+         do j=jam,jbm
+            mask0(j,0:nstep_surface)=s0(j,0:nstep_surface).gt.sync_floor*sync_level(j)
+         enddo
+      else
+         mask0(jam:jbm,0:nstep_surface)=.true.
+      endif
 
       do ic=1,nc0
          ! Channel 0 uses a private mask instead of zeroing s0
@@ -959,7 +1098,7 @@ contains
          ! don't eat into channels 1/2's shared search surface.
          do
             nsloc=maxloc(s0(jam:jbm,0:nstep_surface),mask=mask0(jam:jbm,0:nstep_surface))
-            if(nsloc(1).lt.1) exit              !Nothing left to pick
+            if(nsloc(1).lt.1) exit              !Nothing left above the floor
             jpk=nsloc(1)-1+jam
             ipk=nsloc(2)-1
             if(ipk.gt.nstep_search .or. jpk.lt.ja .or. jpk.gt.jb) then
