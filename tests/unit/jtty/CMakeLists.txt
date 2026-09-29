@@ -89,6 +89,15 @@ set_tests_properties (test_jtty_sticky_retry PROPERTIES
   TIMEOUT 60
 )
 
+add_executable (test_jtty_back_frame test_jtty_back_frame.f90)
+target_include_directories (test_jtty_back_frame PRIVATE ${CMAKE_BINARY_DIR})
+wsjt_link_common_fortran (test_jtty_back_frame)
+add_test (NAME test_jtty_back_frame COMMAND test_jtty_back_frame)
+set_tests_properties (test_jtty_back_frame PROPERTIES
+  PASS_REGULAR_EXPRESSION "test_jtty_back_frame: all checks passed"
+  TIMEOUT 60
+)
+
 add_executable (test_jtty_windowed_decode test_jtty_windowed_decode.f90)
 target_include_directories (test_jtty_windowed_decode PRIVATE ${CMAKE_BINARY_DIR})
 wsjt_link_common_fortran (test_jtty_windowed_decode)
