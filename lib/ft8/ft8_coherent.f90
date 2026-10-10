@@ -9,7 +9,7 @@ module ft8_coherent
   implicit none
   private
   public :: ft8coh_state, ft8coh_enabled, ft8coh_init, ft8coh_next, ft8coh_log
-  public :: ft8coh_accept
+  public :: ft8coh_accept, ft8coh_set_live
 
   integer, parameter :: NN=79            !Channel symbols per message
   integer, parameter :: NSYNC=21         !Costas sync symbols
@@ -45,13 +45,15 @@ module ft8_coherent
      real :: f1,xdt                      !For diagnostics only
   end type ft8coh_state
 
-  integer, save :: ncand_max=MAXCAND
+  integer, save :: ncand_max=3
   integer, save :: ndd_max=MAXDD
   integer, save :: maxchk=40
   integer, parameter :: MAXCHK_ACCEPT=30
   integer, save :: maxhe=30
   real, save :: minpsn=1.3
   real, save :: llrscale=1.0
+  real, save :: tlim=16.0                !Live: no new attempts past this period clock (s)
+  logical, save :: llive=.false.,lforcelive=.false.
   real, save :: llgap=1.0e30
   logical, save :: ldebug=.false.
   integer, save :: nenv=-1               !-1 not read, 0 default, 1 force on, 2 force off
@@ -105,6 +107,16 @@ contains
           read(val(1:n),*,iostat=ios) rval
           if(ios.eq.0) llrscale=rval
        endif
+       call get_environment_variable('FT8COH_TLIM',val,n,ios)
+       if(ios.eq.0 .and. n.gt.0) then
+          read(val(1:n),*,iostat=ios) rval
+          if(ios.eq.0) tlim=rval
+       endif
+       call get_environment_variable('FT8COH_LIVE',val,n,ios)
+       if(ios.eq.0 .and. n.gt.0) then
+          read(val(1:n),*,iostat=ios) ival
+          if(ios.eq.0 .and. ival.ne.0) lforcelive=.true.
+       endif
        call get_environment_variable('FT8COH_LLGAP',val,n,ios)
        if(ios.eq.0 .and. n.gt.0) then
           read(val(1:n),*,iostat=ios) rval
@@ -122,6 +134,25 @@ contains
     if(nenv.eq.1) ft8coh_enabled=.true.
     if(nenv.eq.2) ft8coh_enabled=.false.
   end function ft8coh_enabled
+
+!-----------------------------------------------------------------------
+  subroutine ft8coh_set_live(live)
+! Live data (not from disk): coherent attempts stop at tlim on the period clock
+    logical, intent(in) :: live
+    llive=live
+  end subroutine ft8coh_set_live
+
+  logical function ft8coh_time_ok()
+! Period clock as in ft8_decode's timestamp: 10..25 s, 15.0 = start of next period
+    integer :: it(8)
+    real :: tseq
+    ft8coh_time_ok=.true.
+    if(.not.(llive .or. lforcelive)) return
+    call date_and_time(values=it)
+    tseq=mod(it(7)+0.001*it(8),15.0)
+    if(tseq.lt.10.0) tseq=tseq+15.0
+    ft8coh_time_ok=tseq.lt.tlim
+  end function ft8coh_time_ok
 
 !-----------------------------------------------------------------------
   subroutine ft8coh_init(cd0,np2,ibest,f1,xdt,s,ok)
@@ -151,6 +182,7 @@ contains
     s%idd=0
     s%delta=0.0
     ok=.false.
+    if(.not.ft8coh_time_ok()) return
 
 ! Samples of the 79 symbols, zero outside the available data
     do m=0,NSAMP-1
@@ -318,6 +350,7 @@ contains
 
     ok=.false.
     llr=0.0
+    if(.not.ft8coh_time_ok()) return
     if(s%icand.ge.1 .and. s%idd.lt.ndd_max .and. nchk.le.maxchk) then
        s%idd=s%idd+1
        call dd_pass(s,zpost)

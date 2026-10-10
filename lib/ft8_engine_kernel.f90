@@ -6,6 +6,7 @@ module ft8_engine_kernel
   use decoder_engine_types, only: ft8_signal_evidence
   use ft8_decode, only: c2fox,g2fox,nsnrfox,nfreqfox,n30fox,n30z,nfox,ft8_a8d
   use ft8_decodevar, only: ltry_a8
+  use ft8_coherent, only: ft8coh_set_live
   use ft8_decode_ranges, only: max_ft8_decode_ranges, partition_ft8_decode_range
   use ft8_mtd_residual, only: mtd_prepare,mtd_finish,mtd_worker_residual,mtd_worker_spectrum
   use decoder_callbacks, only: decoder_callback_context,counting_ft8_decoder, &
@@ -169,6 +170,7 @@ contains
     hisgrid4=hisgrid(1:4)
     ncandallthr=0
     if(params%nzhsym.eq.41 .or. params%lmultift8) ltry_a8=.true.
+    call ft8coh_set_live(.not.logical(params%ndiskdat))
 
     if(context%render_legacy) then
        inquire(file='rx_messages.txt',exist=ex)
