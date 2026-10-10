@@ -84,6 +84,7 @@ contains
     integer :: n,ios,ival
     real :: rval
 
+!$omp critical(ft8coh_env)
     if(nenv.lt.0) then
        nenv=0
        call get_environment_variable('FT8COH',val,n,ios)
@@ -135,6 +136,7 @@ contains
           if(ios.eq.0 .and. ival.ne.0) ldebug=.true.
        endif
     endif
+!$omp end critical(ft8coh_env)
     ft8coh_enabled=.false.
     if(ndepth.ge.4) ft8coh_enabled=.true.
     if(nenv.eq.1) ft8coh_enabled=.true.
@@ -306,6 +308,7 @@ contains
     call sort_cands(s)
     ok=s%ncand.gt.0
     if(ldebug) then
+!$omp critical(ft8coh_log)
        open(78,file='ft8_coherent.log',status='unknown',position='append')
        write(78,'(a,f8.1,f6.2,a,f7.3,a,f6.2,a,i2)') 'init f1=',f1,xdt,' sig2=',s%sigma2,  &
             ' ps/n=',1.0/s%sigma2,' ncand=',s%ncand
@@ -314,6 +317,7 @@ contains
                ' ll=',s%candll(ic),' dop=',DOPBANK(s%candidop(ic))
        enddo
        close(78)
+!$omp end critical(ft8coh_log)
     endif
     return
   end subroutine ft8coh_init
@@ -385,12 +389,14 @@ contains
     if(.not.ldebug) return
     tag='TRY   '
     if(lok) tag='DECODE'
+!$omp critical(ft8coh_log)
     open(78,file='ft8_coherent.log',status='unknown',position='append')
     write(78,'(a6,a,f8.1,f6.2,a,f6.2,a,i2,a,i2,a,f8.4,a,f5.2,a,i3,a,i3,f7.1,2x,a)') tag,  &
          ' f1=',s%f1,s%xdt,' ps/n=',1.0/s%sigma2,' cand=',s%icand,' dd=',s%idd,          &
          ' df=',s%delta,' dop=',DOPBANK(s%idop),' nchk=',nchk,' nhe=',nharderrors,dmin,   &
          trim(msg37)
     close(78)
+!$omp end critical(ft8coh_log)
   end subroutine ft8coh_log
 
 !-----------------------------------------------------------------------

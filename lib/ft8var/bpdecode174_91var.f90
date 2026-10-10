@@ -2,11 +2,31 @@ subroutine bpdecode174_91var(llr,apmask,maxiterations,message77,cw,nharderror,it
 !
 ! A log-domain belief propagation decoder for the (174,91) code.
 !
+integer, parameter:: N=174
+integer*1 cw(N)
+integer*1, intent(in) :: apmask(N)
+integer*1 message77(77)
+real, intent(in) :: llr(N)
+real zpost(N)
+
+call bpdecode174_91var_post(llr,apmask,maxiterations,message77,cw,nharderror,iter,  &
+     zpost,nchk)
+return
+end subroutine bpdecode174_91var
+
+subroutine bpdecode174_91var_post(llr,apmask,maxiterations,message77,cw,nharderror,  &
+     iter,zpost,nchk)
+!
+! As bpdecode174_91var, but also returns the posterior bit LLRs of the
+! last iteration in zpost and its number of unsatisfied checks in nchk.
+! Used by the coherent FT8 decision-directed pass.
+!
 use iso_c_binding, only: c_loc,c_size_t
 use crc
 integer, parameter:: N=174, K=91, M=N-K
 integer*1 cw(N)
 integer*1, intent(in) :: apmask(N)
+real zpost(N)
 integer*1 decoded(K)
 integer*1 message77(77)
 integer nrw(M),ncw
@@ -35,6 +55,8 @@ do j=1,M
 enddo
 
 ncnt=0
+zpost=llr
+nchk=M
 
 do iter=0,maxiterations
 
@@ -46,6 +68,7 @@ do iter=0,maxiterations
       zn(i)=llr(i)
     endif
   enddo
+  zpost=zn
 
 ! Check to see if we have a codeword (check before we do any iteration).
   cw=0
@@ -56,6 +79,7 @@ do iter=0,maxiterations
     if( mod(synd(i),2) .ne. 0 ) ncheck=ncheck+1
 !   if( mod(synd(i),2) .ne. 0 ) write(*,*) 'check ',i,' unsatisfied'
   enddo
+  nchk=ncheck
 ! write(*,*) 'number of unsatisfied parity checks ',ncheck
   if( ncheck .eq. 0 ) then ! we have a codeword - if crc is good, return it
     decoded=cw(1:K)
@@ -114,4 +138,4 @@ do iter=0,maxiterations
 enddo
 nharderror=-1
 return
-end subroutine bpdecode174_91var
+end subroutine bpdecode174_91var_post

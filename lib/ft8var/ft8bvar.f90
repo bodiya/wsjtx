@@ -16,6 +16,7 @@ subroutine ft8bvar(residual,spectrum,newdat1,nQSOProgress,nfqso,nftx,napwid, &
   use ft8_mtd_residual, only : mtd_commit_subtraction,mtd_mark_spectrum_current, &
        mtd_refresh_candidate
   use decode_completion_module, only : write_decode_progress
+  use ft8_coherent
   use ft8_mod1, only : allmessages,ndecodes,apsym,mcq,m73,mrr73,mrrr,icos7,       &
        naptypes,nhaptypes,one,graymap,oddcopy,evencopy,lastrxmsg,lasthcall,       &
        nlasttx,calldteven,calldtodd,lqsomsgdcd,mycalllen1,msgroot,msgrootlen,     &
@@ -66,6 +67,11 @@ subroutine ft8bvar(residual,spectrum,newdat1,nQSOProgress,nfqso,nftx,napwid, &
   type(ft8_signal_evidence), optional, intent(out) :: evidence
   character(len=37) :: decoded_payload_message
   logical :: has_decoded_payload
+  complex cdcoh(-800:4000)                 !Coherent path: iqso=1 baseband snapshot
+  real zpost(174),f1coh,xdtcoh
+  integer ibcoh,icoh,nchk
+  logical lcohsnap,lcohok
+  type(ft8coh_state) :: coh
 
   type(tmpcqdec_struct) tmpcqdec(numdeccq)
   type(tmpcqsig_struct) tmpcqsig(numcqsig) ! 20 sigs 24 threads
@@ -78,6 +84,7 @@ subroutine ft8bvar(residual,spectrum,newdat1,nQSOProgress,nfqso,nftx,napwid, &
   if(present(evidence)) evidence=ft8_signal_evidence()
   has_decoded_payload=.false.
   decoded_payload_message=''
+  lcohsnap=.false.
   itone=0
   iaptype2 = 99  !ft8md
   
@@ -289,6 +296,13 @@ subroutine ft8bvar(residual,spectrum,newdat1,nQSOProgress,nfqso,nftx,napwid, &
      dfqso=abs(nfqso-f1)
      lastsync=.true.
      call sync8dvar(cd0,i0,ctwk,2,sync,ipass,lastsync,iqso,lcq,lcallsstd,lcqcand)
+     if(iqso.eq.1) then                      !Snapshot for the coherent path
+        cdcoh=cd0
+        ibcoh=ibest
+        f1coh=f1
+        xdtcoh=xdt
+        lcohsnap=.true.
+     endif
 
 16   if(iqso.eq.3) ibest=ibest+1
 
@@ -2327,7 +2341,63 @@ subroutine ft8bvar(residual,spectrum,newdat1,nQSOProgress,nfqso,nftx,napwid, &
      enddo ! weak sigs
      if(nbadcrc.eq.0) exit
   enddo !nqso sync
-  
+
+! Coherent passes (FT8COH=1) after every standard pass failed: sync-only
+! channel estimate per frequency candidate, then decision-directed passes.
+  if(nbadcrc.ne.0 .and. lcohsnap .and. ft8coh_enabled(0)) then
+     call ft8coh_init(cdcoh,4801,ibcoh+800,f1coh,xdtcoh,coh,lcohok)
+     nchk=83
+     do icoh=1,20
+        if(.not.lcohok) exit
+        call ft8coh_next(coh,zpost,nchk,llrz,lcohok)
+        if(.not.lcohok) exit
+        apmask=0
+        cw=0
+        call bpdecode174_91var_post(llrz,apmask,max_iterations,message77,cw,     &
+             nharderrors,niterations,zpost,nchk)
+        dmin=0.0
+        if(nharderrors.lt.0) call osd174_91var(llrz,apmask,3,message77,cw,       &
+             nharderrors,dmin,nthr,progress_generation)
+        call ft8coh_log(coh,msg37,nharderrors,dmin,nchk,.false.)
+        if(count(cw.eq.0).eq.174) cycle
+        if(.not.ft8coh_accept(nharderrors,nchk)) cycle
+        write(c77,'(77i1)') message77
+        read(c77(72:74),'(b3)') n3
+        read(c77(75:77),'(b3)') i3
+        if(i3.gt.5 .or. (i3.eq.0.and.n3.gt.6)) cycle
+        if(i3.eq.0 .and. n3.eq.2) cycle
+        call unpack77_configured_for_state(codec,c77,1,msg37,unpk77_successvar,  &
+             unpack77_options(thread_index=nthr))
+        if(.not.unpk77_successvar) cycle
+        call ft8coh_log(coh,msg37,nharderrors,dmin,nchk,.true.)
+        nbadcrc=0
+        iaptype=0
+        iaptype2=9
+        cd0=cdcoh
+        i0=ibcoh
+        ibest=ibcoh
+        f1=f1coh
+        xdt=xdtcoh
+        lft8s=.false.
+        lft8sd=.false.
+        lcall1hash=.false.
+        if(msg37(1:1).eq.'<') lcall1hash=.true.
+        call ft8var_tones_from_77bits(message77,itone)
+        has_decoded_payload=.true.
+        decoded_payload_message=msg37
+        if(present(evidence)) evidence%payload77=message77
+        i3bit=0
+        if(i3.eq.0 .and. n3.eq.1) i3bit=1
+        lFreeText=(i3.eq.0 .and. n3.eq.0)
+        lcall2hash=.false.
+        if(.not.lFreeText .and. i3bit.ne.1 .and. index(msg37,'<').gt.0) then
+           if(index(msg37,'<').gt.4) lcall2hash=.true.
+           lhashmsg=.true.
+        endif
+        exit
+     enddo
+  endif
+
 2 if(nbadcrc.eq.0) then
 ! check for the false FT8Svar decode
      if(lft8s .and. lrepliedother) then
