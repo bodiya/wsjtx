@@ -20,10 +20,8 @@ end subroutine decode174_91
 subroutine decode174_91_post(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,  &
      nharderror,dmin,zpost,nchk)
 !
-! As decode174_91, but also returns the posterior bit LLRs (channel LLR
-! plus all incoming check messages) from the last belief-propagation
-! iteration in zpost, and the number of unsatisfied parity checks at that
-! iteration in nchk.  Used by the coherent FT8 decision-directed pass.
+! As decode174_91, also returning the last BP posterior LLRs (zpost) and
+! unsatisfied check count (nchk) for the coherent FT8 path.
 !
    integer, parameter:: N=174, K=91, M=N-K
    integer*1 cw(N),apmask(N)

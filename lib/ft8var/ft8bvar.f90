@@ -2342,8 +2342,7 @@ subroutine ft8bvar(residual,spectrum,newdat1,nQSOProgress,nfqso,nftx,napwid, &
      if(nbadcrc.eq.0) exit
   enddo !nqso sync
 
-! Coherent passes (FT8COH=1) after every standard pass failed: sync-only
-! channel estimate per frequency candidate, then decision-directed passes.
+! Coherent passes (FT8COH=1) only after all standard passes failed
   if(nbadcrc.ne.0 .and. lcohsnap .and. ft8coh_enabled(0)) then
      call ft8coh_init(cdcoh,4801,ibcoh+800,f1coh,xdtcoh,coh,lcohok)
      nchk=83

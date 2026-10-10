@@ -1,30 +1,10 @@
 module ft8_coherent
 
-! Coherent FT8 decoding path.
-!
-! The standard decoder reduces the per-symbol tone correlations to
-! magnitudes.  This module keeps them complex, estimates the complex
-! channel gain over the message from the 21 Costas sync tones, scores the
-! tones with a partially coherent metric that trusts the estimate only as
-! far as its error variance allows, and after a failed decode reuses the
-! LDPC posterior LLRs as extra pilots (decision-directed passes).
-!
-! The path is receive-side only and is run from ft8b after the standard
-! noncoherent decode attempts fail.  It is enabled with decode depth >= 4
-! or the environment variable FT8COH=1 (FT8COH=0 forces it off).
-!
-! Other environment knobs, for experiments:
-!   FT8COH_NCAND  number of frequency candidates to try      (default 5)
-!   FT8COH_NDD    decision-directed passes per candidate     (default 3)
-!   FT8COH_DEBUG  =1 appends estimator diagnostics to ft8_coherent.log
-!   FT8COH_MINPSN minimum sync-tone signal/noise power ratio to try (default 1.3)
-!   FT8COH_MAXCHK run a DD pass only if the failed decode left at most this
-!                 many unsatisfied parity checks                 (default 40)
-!   FT8COH_LLGAP  try a further frequency candidate only if its search
-!                 log-likelihood is within this of the best       (default 1e30)
-!   FT8COH_MAXHE  accept a coherent decode only with at most this many hard
-!                 errors and at most 30 unsatisfied checks        (default 30)
-!   FT8COH_LLRSCALE multiplies the coherent LLRs (experiments only; default 1)
+! Coherent FT8 decoding path, run from ft8b/ft8bvar after the standard
+! passes fail.  Estimates the complex channel gain from the Costas sync
+! tones, scores tones with a partially coherent metric, and reuses the
+! LDPC posterior as extra pilots (decision-directed passes).
+! Enabled by decode depth >= 4 or FT8COH=1; see lib/ft8/ft8_coherent.md.
 
   implicit none
   private
@@ -146,10 +126,8 @@ contains
 !-----------------------------------------------------------------------
   subroutine ft8coh_init(cd0,np2,ibest,f1,xdt,s,ok)
 
-! Set up the coherent state for one candidate signal: tone correlations
-! at zero offset, noise and signal power, and the joint frequency-offset /
-! Doppler-spread search over the sync tones.  Produces an ordered list of
-! frequency candidates (best first).
+! Tone correlations, noise and signal power, joint offset/Doppler search
+! over the sync tones; returns frequency candidates, best first.
 
     integer, intent(in) :: np2,ibest
     complex, intent(in) :: cd0(0:np2-1)
@@ -189,7 +167,6 @@ contains
     call tone_corr(s)
 
 ! Noise variance per bin from the 7 off-tone bins of the 21 sync symbols
-! (147 pure-noise samples when the sync is right; no order-statistic bias)
     call sync_index(isync,itsync)
     q=0.0
     do i=1,NSYNC
@@ -278,8 +255,7 @@ contains
     enddo
     deallocate(llg,ipk,llpk)
 
-! Fine pass around each candidate over the full hypothesis bank; the
-! Doppler hypothesis is chosen at the best offset.
+! Fine pass around each candidate over the full bank; Doppler chosen there
     dfine=step/12.0
     do ic=1,s%ncand
        llmax=-huge(1.0)
@@ -325,11 +301,9 @@ contains
 !-----------------------------------------------------------------------
   subroutine ft8coh_next(s,zpost,nchk,llr,ok)
 
-! Produce the next set of 174 bit LLRs.  The first call for a candidate
-! uses the sync-only channel estimate; subsequent calls run a
-! decision-directed pass from the posterior LLRs of the failed decode
-! (nchk is its number of unsatisfied parity checks).
-! ok=.false. when all candidates and passes are exhausted.
+! Next LLR set: sync-only estimate for a new candidate, or a
+! decision-directed pass from the failed decode's posterior (zpost,nchk).
+! ok=.false. when candidates and passes are exhausted.
 
     type(ft8coh_state), intent(inout) :: s
     real, intent(in) :: zpost(174)
@@ -371,9 +345,7 @@ contains
 
 !-----------------------------------------------------------------------
   logical function ft8coh_accept(nharderrors,nchk)
-! False-decode guard for codewords found from coherent LLRs: the OSD can
-! return a valid CRC from random LLRs, and the coherent path makes many
-! more attempts per candidate than the standard path.
+! False-decode guard: the coherent path makes many more OSD attempts
     integer, intent(in) :: nharderrors,nchk
     ft8coh_accept=nharderrors.ge.0 .and. nharderrors.le.maxhe .and. nchk.le.MAXCHK_ACCEPT
   end function ft8coh_accept
@@ -402,9 +374,8 @@ contains
 !-----------------------------------------------------------------------
   subroutine dd_pass(s,zpost)
 
-! One decision-directed pass: soft tone probabilities from the posterior
-! bit LLRs, soft channel observations for the data symbols, residual
-! offset refinement, re-smoothing with sync plus soft observations.
+! Decision-directed pass: soft tone probabilities from the posterior,
+! soft observations, residual offset refinement, re-smoothing.
 
     type(ft8coh_state), intent(inout) :: s
     real, intent(in) :: zpost(174)
@@ -512,8 +483,7 @@ contains
 !-----------------------------------------------------------------------
   subroutine soft_obs(s,lsoft,nobs,iobs,zobs,vobs)
 
-! Build the observation list: the 21 sync tones (variance sigma2) followed
-! by soft observations for the data symbols with usable tone probabilities.
+! Observation list: sync tones, then soft observations for data symbols
 
     type(ft8coh_state), intent(in) :: s
     logical, intent(in) :: lsoft(NN)
@@ -554,8 +524,7 @@ contains
 !-----------------------------------------------------------------------
   subroutine smooth(s,nobs,iobs,zobs,vobs)
 
-! MMSE (Wiener) smoothing of the channel gain over all 79 symbols from
-! the observations: hhat = R (R+V)^-1 z, sige2 = 1 - diag(R (R+V)^-1 R).
+! MMSE smoothing: hhat = R (R+V)^-1 z, sige2 = 1 - diag(R (R+V)^-1 R)
 
     type(ft8coh_state), intent(inout) :: s
     integer, intent(in) :: nobs,iobs(NN)

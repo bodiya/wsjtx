@@ -17,9 +17,8 @@ end subroutine bpdecode174_91var
 subroutine bpdecode174_91var_post(llr,apmask,maxiterations,message77,cw,nharderror,  &
      iter,zpost,nchk)
 !
-! As bpdecode174_91var, but also returns the posterior bit LLRs of the
-! last iteration in zpost and its number of unsatisfied checks in nchk.
-! Used by the coherent FT8 decision-directed pass.
+! As bpdecode174_91var, also returning the last posterior LLRs (zpost)
+! and unsatisfied check count (nchk) for the coherent FT8 path.
 !
 use iso_c_binding, only: c_loc,c_size_t
 use crc

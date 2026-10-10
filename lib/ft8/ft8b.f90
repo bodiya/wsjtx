@@ -299,10 +299,7 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
   endif
   if(nzhsym.lt.50) npasses=5
 
-! Coherent passes (behind a switch) run only after all standard passes fail.
-! Each coherent pass is one LLR set: sync-only channel estimate for a
-! frequency candidate, then up to three decision-directed refinements,
-! then the next candidate.
+! Coherent passes (depth 4 or FT8COH=1) only after all standard passes fail
   ncohpass=0
   if(nzhsym.ge.50 .and. ft8coh_enabled(ndepth)) ncohpass=20
 
