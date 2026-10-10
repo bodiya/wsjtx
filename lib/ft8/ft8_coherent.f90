@@ -24,6 +24,7 @@ module ft8_coherent
 !                 log-likelihood is within this of the best       (default 1e30)
 !   FT8COH_MAXHE  accept a coherent decode only with at most this many hard
 !                 errors and at most FT8COH_MAXCHK unsatisfied checks (default 30)
+!   FT8COH_LLRSCALE multiplies the coherent LLRs (experiments only; default 1)
 
   implicit none
   private
@@ -69,6 +70,7 @@ module ft8_coherent
   integer, save :: maxchk=28
   integer, save :: maxhe=30
   real, save :: minpsn=1.3
+  real, save :: llrscale=1.0
   real, save :: llgap=1.0e30
   logical, save :: ldebug=.false.
   integer, save :: nenv=-1               !-1 not read, 0 default, 1 force on, 2 force off
@@ -116,6 +118,11 @@ contains
           read(val(1:n),*,iostat=ios) rval
           if(ios.eq.0) minpsn=rval
        endif
+       call get_environment_variable('FT8COH_LLRSCALE',val,n,ios)
+       if(ios.eq.0 .and. n.gt.0) then
+          read(val(1:n),*,iostat=ios) rval
+          if(ios.eq.0) llrscale=rval
+       endif
        call get_environment_variable('FT8COH_LLGAP',val,n,ios)
        if(ios.eq.0 .and. n.gt.0) then
           read(val(1:n),*,iostat=ios) rval
@@ -150,7 +157,7 @@ contains
     integer :: m,i,k,n,id,ig,ng,isep,ic,j,jbest,idbest
     integer :: isync(NSYNC),itsync(NSYNC)
     integer, allocatable :: ipk(:)
-    real :: pw(8*NN),ts(NSYNC),step,dfine,delta,ll,llmax,q
+    real :: ts(NSYNC),step,dfine,delta,ll,llmax,q
     real, allocatable :: llg(:),llpk(:)
     complex :: z(NSYNC),u(NSYNC)
     real(8) :: a(NSYNC,NSYNC),mm(NSYNC,NSYNC,NDOP),logdet(NDOP),ur(NSYNC),ui(NSYNC)
@@ -178,18 +185,21 @@ contains
     s%ps=1.0
     call tone_corr(s)
 
-! Noise variance per bin: 7 of 8 bins are noise, so use the median of |Y|^2
-    do n=1,NN
+! Noise variance per bin from the 7 off-tone bins of the 21 sync symbols
+! (147 pure-noise samples when the sync is right; no order-statistic bias)
+    call sync_index(isync,itsync)
+    q=0.0
+    do i=1,NSYNC
        do k=0,7
-          pw(k+1+8*(n-1))=real(s%y(k,n))**2+aimag(s%y(k,n))**2
+          if(k.eq.itsync(i)) cycle
+          q=q+real(s%y(k,isync(i)))**2+aimag(s%y(k,isync(i)))**2
        enddo
     enddo
-    call median_inplace(pw,8*NN,q)
+    q=q/(7*NSYNC)
     if(q.le.0.0) return
-    s%sigma2=q/log(2.0)
+    s%sigma2=q
 
 ! Sync observations and signal power
-    call sync_index(isync,itsync)
     q=0.0
     do i=1,NSYNC
        z(i)=s%y(itsync(i),isync(i))
@@ -629,7 +639,7 @@ contains
                 x0(n0)=ms(isym)
              endif
           enddo
-          llr(i32+ib-1)=lse4(x1)-lse4(x0)
+          llr(i32+ib-1)=llrscale*(lse4(x1)-lse4(x0))
        enddo
     enddo
     return
@@ -804,30 +814,6 @@ contains
        ainv(1:n,j)=col
     enddo
   end subroutine spd_inverse
-
-  subroutine median_inplace(x,n,xmed)
-    integer, intent(in) :: n
-    real, intent(inout) :: x(n)
-    real, intent(out) :: xmed
-    integer :: i,j
-    real :: t
-! Simple insertion sort; n is a few hundred
-    do i=2,n
-       t=x(i)
-       j=i-1
-       do while(j.ge.1)
-          if(x(j).le.t) exit
-          x(j+1)=x(j)
-          j=j-1
-       enddo
-       x(j+1)=t
-    enddo
-    if(mod(n,2).eq.1) then
-       xmed=x((n+1)/2)
-    else
-       xmed=0.5*(x(n/2)+x(n/2+1))
-    endif
-  end subroutine median_inplace
 
   subroutine sort_desc(v,idx,n)
 ! Sort v descending, carrying idx along (insertion sort, n small)
