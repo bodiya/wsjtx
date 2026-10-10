@@ -19,11 +19,11 @@ module ft8_coherent
 !   FT8COH_DEBUG  =1 appends estimator diagnostics to ft8_coherent.log
 !   FT8COH_MINPSN minimum sync-tone signal/noise power ratio to try (default 1.3)
 !   FT8COH_MAXCHK run a DD pass only if the failed decode left at most this
-!                 many unsatisfied parity checks                 (default 28)
+!                 many unsatisfied parity checks                 (default 40)
 !   FT8COH_LLGAP  try a further frequency candidate only if its search
 !                 log-likelihood is within this of the best       (default 1e30)
 !   FT8COH_MAXHE  accept a coherent decode only with at most this many hard
-!                 errors and at most FT8COH_MAXCHK unsatisfied checks (default 30)
+!                 errors and at most 30 unsatisfied checks        (default 30)
 !   FT8COH_LLRSCALE multiplies the coherent LLRs (experiments only; default 1)
 
   implicit none
@@ -67,7 +67,8 @@ module ft8_coherent
 
   integer, save :: ncand_max=MAXCAND
   integer, save :: ndd_max=MAXDD
-  integer, save :: maxchk=28
+  integer, save :: maxchk=40
+  integer, parameter :: MAXCHK_ACCEPT=30
   integer, save :: maxhe=30
   real, save :: minpsn=1.3
   real, save :: llrscale=1.0
@@ -370,7 +371,7 @@ contains
 ! return a valid CRC from random LLRs, and the coherent path makes many
 ! more attempts per candidate than the standard path.
     integer, intent(in) :: nharderrors,nchk
-    ft8coh_accept=nharderrors.ge.0 .and. nharderrors.le.maxhe .and. nchk.le.maxchk
+    ft8coh_accept=nharderrors.ge.0 .and. nharderrors.le.maxhe .and. nchk.le.MAXCHK_ACCEPT
   end function ft8coh_accept
 
 !-----------------------------------------------------------------------
