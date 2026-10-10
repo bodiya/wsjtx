@@ -7,6 +7,24 @@ subroutine decode174_91(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,nharder
 ! maxosd>1: do bp and then call osd maxosd times with saved bp outputs
 ! norder  : osd decoding depth
 !
+   integer, parameter:: N=174
+   integer*1 cw(N),apmask(N)
+   integer*1 message91(91)
+   real llr(N),zpost(N)
+
+   call decode174_91_post(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,  &
+        nharderror,dmin,zpost,nchk)
+   return
+end subroutine decode174_91
+
+subroutine decode174_91_post(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,  &
+     nharderror,dmin,zpost,nchk)
+!
+! As decode174_91, but also returns the posterior bit LLRs (channel LLR
+! plus all incoming check messages) from the last belief-propagation
+! iteration in zpost, and the number of unsatisfied parity checks at that
+! iteration in nchk.  Used by the coherent FT8 decision-directed pass.
+!
    integer, parameter:: N=174, K=91, M=N-K
    integer*1 cw(N),apmask(N)
    integer*1 nxor(N),hdec(N)
@@ -19,7 +37,7 @@ subroutine decode174_91(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,nharder
    real toc(7,M)
    real tanhtoc(7,M)
    real zn(N),zsum(N),zsave(N,3)
-   real llr(N)
+   real llr(N),zpost(N)
    real Tmn
 
    include "ldpc_174_91_c_parity.f90"
@@ -49,6 +67,8 @@ subroutine decode174_91(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,nharder
    ncnt=0
    nclast=0
    zsum=0.0
+   zpost=llr
+   nchk=M
    do iter=0,maxiterations
 ! Update bit log likelihood ratios (tov=0 in iteration 0).
       do i=1,N
@@ -58,6 +78,7 @@ subroutine decode174_91(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,nharder
             zn(i)=llr(i)
          endif
       enddo
+      zpost=zn
       zsum=zsum+zn
       if(iter.gt.0 .and. iter.le.maxosd) then
          zsave(:,iter)=zsum
@@ -71,6 +92,7 @@ subroutine decode174_91(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,nharder
          synd(i)=sum(cw(Nm(1:nrw(i),i)))
          if( mod(synd(i),2) .ne. 0 ) ncheck=ncheck+1
       enddo
+      nchk=ncheck
       if( ncheck .eq. 0 ) then ! we have a codeword - if crc is good, return it
          m96=0
          m96(1:77)=cw(1:77)
@@ -152,4 +174,4 @@ subroutine decode174_91(llr,Keff,maxosd,norder,apmask,message91,cw,ntype,nharder
    dminosd=0.0
 
    return
-end subroutine decode174_91
+end subroutine decode174_91_post

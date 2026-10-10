@@ -8,6 +8,7 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
   use packjt77
   use ft8_codec_context, only: get_ft8_codec_state
   use decoder_engine_types, only: ft8_signal_evidence,engine_payload_decoded
+  use ft8_coherent
   include 'ft8_params.f90'
   parameter(NP2=2812)
   character*37 msg37
@@ -18,6 +19,9 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
   real s2(0:511)
   real bmeta(174),bmetb(174),bmetc(174),bmetd(174),bmete(174)
   real llra(174),llrb(174),llrc(174),llrd(174),llre(174),llrz(174)           !Soft symbols
+  real zpost(174)                                                           !Posterior LLRs
+  type(ft8coh_state) :: coh
+  logical lcohok
   real dd0(15*12000)
   real ss(9)
   real temp(3)
@@ -294,8 +298,30 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
      npasses=5
   endif
   if(nzhsym.lt.50) npasses=5
-  
-  do ipass=1,npasses 
+
+! Coherent passes (behind a switch) run only after all standard passes fail.
+! Each coherent pass is one LLR set: sync-only channel estimate for a
+! frequency candidate, then up to three decision-directed refinements,
+! then the next candidate.
+  ncohpass=0
+  if(nzhsym.ge.50 .and. ft8coh_enabled(ndepth)) ncohpass=20
+
+  do ipass=1,npasses+ncohpass
+     if(ipass.gt.npasses) then
+        call timer('ft8coh  ',0)
+        if(ipass.eq.npasses+1) then
+           call ft8coh_init(cd0,NP2,ibest,f1,xdt,coh,lcohok)
+           if(.not.lcohok) then
+              call timer('ft8coh  ',1)
+              exit
+           endif
+        endif
+        call ft8coh_next(coh,zpost,nchk,llrz,lcohok)
+        call timer('ft8coh  ',1)
+        if(.not.lcohok) exit
+        apmask=0
+        iaptype=9
+     else
      llrz=llra
      if(ipass.eq.2) llrz=llrb
      if(ipass.eq.3) llrz=llrc
@@ -436,6 +462,7 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
            endif             
         endif
      endif
+     endif   ! standard (noncoherent) LLR selection and AP setup
 
      cw=0
      dmin=0.0
@@ -449,14 +476,16 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
      endif
      call timer('dec174_9',0)
      Keff=91
-     call decode174_91(llrz,Keff,maxosd,norder,apmask,message91,cw,  &
-                       ntype,nharderrors,dmin)
+     call decode174_91_post(llrz,Keff,maxosd,norder,apmask,message91,cw,  &
+                       ntype,nharderrors,dmin,zpost,nchk)
      if(nharderrors.ge.0) message77=message91(1:77)
      call timer('dec174_9',1)
+     if(ipass.gt.npasses) call ft8coh_log(coh,msg37,nharderrors,dmin,nchk,.false.)
 
      msg37='                                     '
      nbadcrc=1
      if(nharderrors.lt.0 .or. nharderrors.gt.36) cycle
+     if(ipass.gt.npasses .and. .not.ft8coh_accept(nharderrors,nchk)) cycle
      if(count(cw.eq.0).eq.174) cycle           !Reject the all-zero codeword
      write(c77,'(77i1)') message77
      read(c77(72:74),'(b3)') n3
@@ -471,6 +500,7 @@ subroutine ft8b(dd0,newdat,nQSOProgress,nfqso,nftx,ndepth,nzhsym,lapon,     &
      if(.not.unpk77_success) cycle
 ! If we get this far: valid codeword, valid (i3,n3), nonquirky message.
      nbadcrc=0
+     if(ipass.gt.npasses) call ft8coh_log(coh,msg37,nharderrors,dmin,nchk,.true.)
      call get_ft8_tones_from_77bits(message77,itone)
      if(lsubtract) then
         call timer('sub_ft8a',0)

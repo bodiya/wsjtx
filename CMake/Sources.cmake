@@ -417,6 +417,7 @@ set (wsjt_FSRCS
   lib/freqcal.f90
   lib/ft8/ft8apset.f90
   lib/ft8/ft8b.f90
+  lib/ft8/ft8_coherent.f90
   lib/ft8/ft8code.f90
   lib/ft8/ft8_downsample.f90
   lib/ft8/ft8sim.f90
