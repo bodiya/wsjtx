@@ -4,7 +4,14 @@ module ft8_coherent
 ! passes fail.  Estimates the complex channel gain from the Costas sync
 ! tones, scores tones with a partially coherent metric, and reuses the
 ! LDPC posterior as extra pilots (decision-directed passes).
-! Enabled by decode depth >= 4 or FT8COH=1; see lib/ft8/ft8_coherent.md.
+! Enabled by decode depth >= 4 or FT8COH=1 (FT8COH=0 forces it off).
+! Environment knobs, for experiments:
+!   FT8COH_NCAND   frequency candidates per signal (3), FT8COH_NDD DD passes (3)
+!   FT8COH_MINPSN  minimum sync-tone signal/noise power ratio (1.3)
+!   FT8COH_MAXCHK  DD pass only if <= this many checks unsatisfied (40)
+!   FT8COH_MAXHE   accept only with <= this many hard errors (30)
+!   FT8COH_TLIM    live data: no new attempt past this period clock (16.0 s)
+!   FT8COH_LIVE=1  apply the clock budget to disk files; FT8COH_DEBUG=1 log
 
   implicit none
   private
